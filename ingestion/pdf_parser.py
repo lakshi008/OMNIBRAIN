@@ -5,12 +5,20 @@ from pathlib import Path
 def extract_text_and_images(
     pdf_path: str,
     image_output_dir: str = "data/processed/images",
-) -> list[dict]:
+) -> dict:
     """
     Extract text and embedded images from every page of a PDF.
+
+    Returns:
+        A dictionary containing document metadata and page data.
     """
 
     document = pymupdf.open(pdf_path)
+
+    document_metadata = {
+        "filename": Path(pdf_path).name,
+        "total_pages": len(document),
+    }
 
     image_output_path = Path(image_output_dir)
     image_output_path.mkdir(parents=True, exist_ok=True)
@@ -19,10 +27,10 @@ def extract_text_and_images(
 
     for page_number, page in enumerate(document, start=1):
 
-        # Extract text from the page
+        # Extract text
         text = page.get_text("text")
 
-        # Extract images from the page
+        # Extract images
         images = []
 
         for image_index, image_info in enumerate(
@@ -61,4 +69,7 @@ def extract_text_and_images(
 
     document.close()
 
-    return pages
+    return {
+        "metadata": document_metadata,
+        "pages": pages,
+    }
