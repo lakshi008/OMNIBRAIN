@@ -90,3 +90,57 @@ class ParsedDocument:
         return separator.join(
             page.text for page in self.pages if page.has_content
         )
+
+
+@dataclass(frozen=True)
+class ExtractedTable:
+    """Represents an extracted table from a PDF page.
+
+    Attributes:
+        page_number: 1-indexed page number where table was found.
+        table_index: 0-indexed index of table on this page.
+        rows: Number of rows in table.
+        columns: Number of columns in table.
+        cells: 2D list of cell values (rows x columns).
+    """
+
+    page_number: int
+    table_index: int
+    rows: int
+    columns: int
+    cells: list[list[str | None]]
+
+
+@dataclass
+class TableExtractionResult:
+    """Complete result of extracting tables from a PDF document.
+
+    Attributes:
+        metadata: Document-level metadata.
+        tables: List of ExtractedTable objects found across all pages.
+    """
+
+    metadata: DocumentMetadata
+    tables: list[ExtractedTable]
+
+    @property
+    def total_tables(self) -> int:
+        """Total number of tables found across the document."""
+        return len(self.tables)
+
+    @property
+    def has_tables(self) -> bool:
+        """Whether any tables were found in the document."""
+        return len(self.tables) > 0
+
+    def get_tables_on_page(self, page_number: int) -> list[ExtractedTable]:
+        """Return all tables extracted from a specific 1-indexed page.
+
+        Args:
+            page_number: The 1-indexed page number to look up.
+
+        Returns:
+            List of ExtractedTable objects for that page.
+        """
+        return [table for table in self.tables if table.page_number == page_number]
+
