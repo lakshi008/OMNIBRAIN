@@ -144,3 +144,65 @@ class TableExtractionResult:
         """
         return [table for table in self.tables if table.page_number == page_number]
 
+
+@dataclass(frozen=True)
+class ExtractedImage:
+    """Represents an extracted image from a PDF page.
+
+    Attributes:
+        page_number: 1-indexed page number where image was found.
+        image_index: 0-indexed index of image on this page.
+        image_format: Format/extension of the image (e.g. 'png', 'jpeg').
+        width: Width of image in pixels.
+        height: Height of image in pixels.
+        image_bytes: Raw binary bytes of the image.
+        size_bytes: Size of the image in bytes.
+        colorspace: Colorspace name or component count (e.g. 'DeviceRGB').
+        xref: Internal PDF cross-reference ID of the image object.
+    """
+
+    page_number: int
+    image_index: int
+    image_format: str
+    width: int
+    height: int
+    image_bytes: bytes
+    size_bytes: int
+    colorspace: str
+    xref: int
+
+
+@dataclass
+class ImageExtractionResult:
+    """Complete result of extracting images from a PDF document.
+
+    Attributes:
+        metadata: Document-level metadata.
+        images: List of ExtractedImage objects found across all pages.
+    """
+
+    metadata: DocumentMetadata
+    images: list[ExtractedImage]
+
+    @property
+    def total_images(self) -> int:
+        """Total number of images found across the document."""
+        return len(self.images)
+
+    @property
+    def has_images(self) -> bool:
+        """Whether any images were found in the document."""
+        return len(self.images) > 0
+
+    def get_images_on_page(self, page_number: int) -> list[ExtractedImage]:
+        """Return all images extracted from a specific 1-indexed page.
+
+        Args:
+            page_number: The 1-indexed page number to look up.
+
+        Returns:
+            List of ExtractedImage objects for that page.
+        """
+        return [img for img in self.images if img.page_number == page_number]
+
+
