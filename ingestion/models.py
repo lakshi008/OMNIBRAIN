@@ -566,6 +566,55 @@ class VectorSearchResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class RetrievalServiceResult:
+    """High-level result returned by the retrieval service combining ranked results and formatted context.
+
+    Attributes:
+        query_vector_dimension: Dimensionality of the input query vector.
+        results: Ranked, filtered, and deduplicated VectorSearchResult list.
+        context: Serialized textual context containing formatted source citations.
+    """
+
+    query_vector_dimension: int
+    results: list[VectorSearchResult]
+    context: str
+
+    @property
+    def total_results(self) -> int:
+        """Total number of returned results."""
+        return len(self.results)
+
+    @property
+    def has_results(self) -> bool:
+        """Whether any results were returned."""
+        return len(self.results) > 0
+
+    @property
+    def text_results(self) -> int:
+        """Number of text modality results."""
+        return sum(1 for r in self.results if r.content_type == "text")
+
+    @property
+    def table_results(self) -> int:
+        """Number of table modality results."""
+        return sum(1 for r in self.results if r.content_type == "table")
+
+    @property
+    def image_results(self) -> int:
+        """Number of image modality results."""
+        return sum(1 for r in self.results if r.content_type == "image")
+
+    def get_results_by_type(self, content_type: str) -> list[VectorSearchResult]:
+        """Filter results by content type ('text', 'table', 'image')."""
+        return [r for r in self.results if r.content_type == content_type]
+
+    def get_results_on_page(self, page_number: int) -> list[VectorSearchResult]:
+        """Filter results by 1-indexed page number."""
+        return [r for r in self.results if r.page_number == page_number]
+
+
+
 
 
 
