@@ -2,15 +2,18 @@
 OmniBrain Ingestion Pipeline.
 
 Provides PDF parsing, text extraction, table extraction, image extraction,
-unified document ingestion pipeline, and document metadata generation.
+unified document ingestion pipeline, document chunking, and document metadata generation.
 """
 
+from ingestion.chunker import chunk_document
 from ingestion.exceptions import (
     CorruptedPDFError,
     InvalidFileTypeError,
     PDFNotFoundError,
 )
 from ingestion.models import (
+    ChunkingResult,
+    DocumentChunk,
     DocumentMetadata,
     ExtractedImage,
     ExtractedTable,
@@ -26,14 +29,17 @@ from ingestion.pdf_table_extractor import extract_tables
 from ingestion.pdf_text_extractor import extract_text, validate_pdf
 
 __all__ = [
-    # Core pipeline & extractors
+    # Core pipeline, extractors & chunker
     "ingest_pdf",
     "extract_text",
     "extract_tables",
     "extract_images",
+    "chunk_document",
     "validate_pdf",
     # Data models
     "IngestionResult",
+    "ChunkingResult",
+    "DocumentChunk",
     "ParsedDocument",
     "PageData",
     "DocumentMetadata",

@@ -286,4 +286,92 @@ class IngestionResult:
         )
 
 
+@dataclass(frozen=True)
+class DocumentChunk:
+    """Represents an individual chunk of document content for RAG pipelines.
+
+    Attributes:
+        chunk_id: Unique UUID identifier for this chunk.
+        chunk_index: 0-indexed sequential position of this chunk within the document.
+        document_id: Unique identifier of the parent document.
+        filename: Name of the source file.
+        page_number: 1-indexed page number from which content originated.
+        content: Textual content of the chunk (raw text, serialized table, or image reference).
+        content_type: Type of content ('text', 'table', 'image').
+        metadata: Additional contextual metadata (e.g. dimensions, table indices, etc.).
+    """
+
+    chunk_id: str
+    chunk_index: int
+    document_id: str
+    filename: str
+    page_number: int | None
+    content: str
+    content_type: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ChunkingResult:
+    """Structured result of chunking an ingested document.
+
+    Attributes:
+        document_id: Unique identifier of the parent document.
+        filename: Name of the source file.
+        chunks: List of DocumentChunk objects generated from the document.
+    """
+
+    document_id: str
+    filename: str
+    chunks: list[DocumentChunk]
+
+    @property
+    def total_chunks(self) -> int:
+        """Total number of chunks created."""
+        return len(self.chunks)
+
+    @property
+    def text_chunks(self) -> int:
+        """Number of text chunks."""
+        return sum(1 for c in self.chunks if c.content_type == "text")
+
+    @property
+    def table_chunks(self) -> int:
+        """Number of table chunks."""
+        return sum(1 for c in self.chunks if c.content_type == "table")
+
+    @property
+    def image_chunks(self) -> int:
+        """Number of image chunks."""
+        return sum(1 for c in self.chunks if c.content_type == "image")
+
+    @property
+    def has_chunks(self) -> bool:
+        """Whether any chunks were generated."""
+        return len(self.chunks) > 0
+
+    def get_chunks_by_type(self, content_type: str) -> list[DocumentChunk]:
+        """Filter and return chunks matching a specific content type.
+
+        Args:
+            content_type: One of 'text', 'table', 'image'.
+
+        Returns:
+            List of matching DocumentChunk objects.
+        """
+        return [c for c in self.chunks if c.content_type == content_type]
+
+    def get_chunks_on_page(self, page_number: int) -> list[DocumentChunk]:
+        """Filter and return chunks associated with a specific 1-indexed page number.
+
+        Args:
+            page_number: The 1-indexed page number.
+
+        Returns:
+            List of matching DocumentChunk objects.
+        """
+        return [c for c in self.chunks if c.page_number == page_number]
+
+
+
 
