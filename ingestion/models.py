@@ -539,6 +539,34 @@ class EmbeddingGenerationResult:
         return [item for item in self.items if item.page_number == page_number]
 
 
+@dataclass(frozen=True)
+class VectorSearchResult:
+    """Represents a single search result retrieved from the Qdrant vector store.
+
+    Attributes:
+        chunk_id: Unique UUID identifier of the matched chunk.
+        score: Similarity score (e.g. Cosine similarity).
+        document_id: Unique identifier of the parent document.
+        filename: Name of the source file.
+        page_number: 1-indexed page number from which content originated (or None).
+        chunk_index: 0-indexed sequential position within the document.
+        content_type: Content modality ('text', 'table', 'image').
+        content: Text content associated with the vector.
+        metadata: Full metadata payload for filtering, citations, and lineage.
+    """
+
+    chunk_id: str
+    score: float
+    document_id: str
+    filename: str
+    page_number: int | None
+    chunk_index: int
+    content_type: str
+    content: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+
 
 
 

@@ -3,7 +3,8 @@ OmniBrain Ingestion Pipeline.
 
 Provides PDF parsing, text extraction, table extraction, image extraction,
 unified document ingestion pipeline, document chunking, chunk validation,
-normalization, embedding preparation, embedding generation, and document metadata generation.
+normalization, embedding preparation, embedding generation, Qdrant vector store integration,
+and document metadata generation.
 """
 
 from ingestion.chunk_validator import normalize_chunks, validate_chunks
@@ -31,14 +32,17 @@ from ingestion.models import (
     PageData,
     ParsedDocument,
     TableExtractionResult,
+    VectorSearchResult,
 )
 from ingestion.pdf_image_extractor import extract_images
 from ingestion.pdf_ingestion_pipeline import ingest_pdf
 from ingestion.pdf_table_extractor import extract_tables
 from ingestion.pdf_text_extractor import extract_text, validate_pdf
+from ingestion.qdrant_config import QdrantConfig
+from ingestion.qdrant_store import QdrantVectorStore
 
 __all__ = [
-    # Core pipeline, extractors, chunker, validator, preparation & generator
+    # Core pipeline, extractors, chunker, validator, preparation, generator & store
     "ingest_pdf",
     "extract_text",
     "extract_tables",
@@ -49,6 +53,8 @@ __all__ = [
     "prepare_for_embedding",
     "generate_embeddings",
     "EmbeddingProvider",
+    "QdrantVectorStore",
+    "QdrantConfig",
     "validate_pdf",
     # Data models
     "IngestionResult",
@@ -58,6 +64,7 @@ __all__ = [
     "EmbeddingPreparationResult",
     "EmbeddingVectorRecord",
     "EmbeddingGenerationResult",
+    "VectorSearchResult",
     "DocumentChunk",
     "ParsedDocument",
     "PageData",
