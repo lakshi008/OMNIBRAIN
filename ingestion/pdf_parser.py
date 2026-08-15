@@ -15,11 +15,13 @@ def extract_text_and_images(
 
     document = pymupdf.open(pdf_path)
 
+    # Document-level metadata
     document_metadata = {
         "filename": Path(pdf_path).name,
         "total_pages": len(document),
     }
 
+    # Create image output directory
     image_output_path = Path(image_output_dir)
     image_output_path.mkdir(parents=True, exist_ok=True)
 
@@ -29,6 +31,7 @@ def extract_text_and_images(
 
         # Extract text
         text = page.get_text("text")
+        clean_text = text.strip()
 
         # Extract images
         images = []
@@ -59,11 +62,14 @@ def extract_text_and_images(
                 }
             )
 
+        # Store page information
         pages.append(
             {
                 "page": page_number,
-                "text": text.strip(),
+                "text": clean_text,
                 "images": images,
+                "character_count": len(clean_text),
+                "word_count": len(clean_text.split()),
             }
         )
 
