@@ -394,6 +394,80 @@ class ChunkValidationResult:
     warnings: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class EmbeddingRecord:
+    """Represents an embedding-ready record prepared from a DocumentChunk.
+
+    Separates the text content to be embedded from the structured metadata required
+    for vector storage, filtering, and RAG citation generation.
+
+    Attributes:
+        chunk_id: Unique UUID identifier of the source chunk.
+        document_id: Unique identifier of the parent document.
+        filename: Name of the source file.
+        chunk_index: 0-indexed sequential position within the document.
+        page_number: 1-indexed page number from which content originated (or None).
+        content: The text content to be embedded.
+        content_type: Content modality ('text', 'table', 'image').
+        metadata: Separate metadata dictionary for vector payload/filtering/citations.
+    """
+
+    chunk_id: str
+    document_id: str
+    filename: str
+    chunk_index: int
+    page_number: int | None
+    content: str
+    content_type: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class EmbeddingPreparationResult:
+    """Structured result of preparing validated chunks for embedding generation.
+
+    Attributes:
+        document_id: Unique identifier of the parent document.
+        filename: Name of the source file.
+        items: Deterministically ordered list of EmbeddingRecord objects.
+        is_ready: True if records were successfully validated and prepared.
+    """
+
+    document_id: str
+    filename: str
+    items: list[EmbeddingRecord]
+    is_ready: bool
+
+    @property
+    def total_items(self) -> int:
+        """Total number of embedding-ready records."""
+        return len(self.items)
+
+    @property
+    def text_items(self) -> int:
+        """Number of text records."""
+        return sum(1 for item in self.items if item.content_type == "text")
+
+    @property
+    def table_items(self) -> int:
+        """Number of table records."""
+        return sum(1 for item in self.items if item.content_type == "table")
+
+    @property
+    def image_items(self) -> int:
+        """Number of image records."""
+        return sum(1 for item in self.items if item.content_type == "image")
+
+    def get_items_by_type(self, content_type: str) -> list[EmbeddingRecord]:
+        """Filter embedding records by content type ('text', 'table', 'image')."""
+        return [item for item in self.items if item.content_type == content_type]
+
+    def get_items_on_page(self, page_number: int) -> list[EmbeddingRecord]:
+        """Filter embedding records by 1-indexed page number."""
+        return [item for item in self.items if item.page_number == page_number]
+
+
+
 
 
 
