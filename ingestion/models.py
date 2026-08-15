@@ -373,5 +373,27 @@ class ChunkingResult:
         return [c for c in self.chunks if c.page_number == page_number]
 
 
+@dataclass
+class ChunkValidationResult:
+    """Result of validating a collection of DocumentChunk objects.
+
+    Attributes:
+        is_valid: True if no errors were encountered.
+        total_chunks: Total number of chunks evaluated.
+        valid_chunks: Number of valid chunks.
+        invalid_chunks: Number of chunks with errors.
+        errors: Detailed list of validation error messages.
+        warnings: List of non-fatal warning messages (e.g., duplicate content).
+    """
+
+    is_valid: bool
+    total_chunks: int
+    valid_chunks: int
+    invalid_chunks: int
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+
 
 
