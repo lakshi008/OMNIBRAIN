@@ -206,3 +206,84 @@ class ImageExtractionResult:
         return [img for img in self.images if img.page_number == page_number]
 
 
+@dataclass
+class IngestionResult:
+    """Unified result of the complete PDF ingestion pipeline.
+
+    Combines document metadata, page text data, extracted tables, and extracted images.
+
+    Attributes:
+        metadata: DocumentMetadata describing the parsed document.
+        pages: List of PageData objects for each page.
+        tables: List of ExtractedTable objects found across the document.
+        images: List of ExtractedImage objects found across the document.
+    """
+
+    metadata: DocumentMetadata
+    pages: list[PageData]
+    tables: list[ExtractedTable]
+    images: list[ExtractedImage]
+
+    @property
+    def total_pages(self) -> int:
+        """Total number of pages in the document."""
+        return self.metadata.total_pages
+
+    @property
+    def pages_with_text(self) -> int:
+        """Number of pages with extractable text."""
+        return self.metadata.pages_with_content
+
+    @property
+    def pages_without_text(self) -> int:
+        """Number of pages without extractable text."""
+        return self.metadata.pages_without_content
+
+    @property
+    def total_tables(self) -> int:
+        """Total number of tables extracted across all pages."""
+        return len(self.tables)
+
+    @property
+    def total_images(self) -> int:
+        """Total number of images extracted across all pages."""
+        return len(self.images)
+
+    @property
+    def has_text(self) -> bool:
+        """Whether the document contains any extractable text."""
+        return self.pages_with_text > 0
+
+    @property
+    def has_tables(self) -> bool:
+        """Whether any tables were extracted from the document."""
+        return len(self.tables) > 0
+
+    @property
+    def has_images(self) -> bool:
+        """Whether any images were extracted from the document."""
+        return len(self.images) > 0
+
+    def get_page(self, page_number: int) -> PageData | None:
+        """Return PageData for a specific 1-indexed page number."""
+        for page in self.pages:
+            if page.page_number == page_number:
+                return page
+        return None
+
+    def get_tables_on_page(self, page_number: int) -> list[ExtractedTable]:
+        """Return all tables extracted from a specific 1-indexed page."""
+        return [table for table in self.tables if table.page_number == page_number]
+
+    def get_images_on_page(self, page_number: int) -> list[ExtractedImage]:
+        """Return all images extracted from a specific 1-indexed page."""
+        return [img for img in self.images if img.page_number == page_number]
+
+    def get_all_text(self, separator: str = "\n\n") -> str:
+        """Concatenate text from all content pages."""
+        return separator.join(
+            page.text for page in self.pages if page.has_content
+        )
+
+
+
