@@ -467,6 +467,79 @@ class EmbeddingPreparationResult:
         return [item for item in self.items if item.page_number == page_number]
 
 
+@dataclass(frozen=True)
+class EmbeddingVectorRecord:
+    """Represents an embedding vector associated with its source chunk and metadata.
+
+    Attributes:
+        chunk_id: Unique UUID identifier of the source chunk.
+        document_id: Unique identifier of the parent document.
+        filename: Name of the source file.
+        chunk_index: 0-indexed sequential position within the document.
+        page_number: 1-indexed page number from which content originated (or None).
+        content_type: Content modality ('text', 'table', 'image').
+        vector: Dense embedding vector as a list of floats.
+        metadata: Full metadata payload for vector store indexing, filtering, and citations.
+    """
+
+    chunk_id: str
+    document_id: str
+    filename: str
+    chunk_index: int
+    page_number: int | None
+    content_type: str
+    vector: list[float]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class EmbeddingGenerationResult:
+    """Structured result of generating embeddings for a document's chunks.
+
+    Attributes:
+        document_id: Unique identifier of the parent document.
+        filename: Name of the source file.
+        items: Deterministically ordered list of EmbeddingVectorRecord objects.
+        dimension: Dimensionality of the generated embedding vectors.
+        is_ready: True if vectors were successfully generated and validated.
+    """
+
+    document_id: str
+    filename: str
+    items: list[EmbeddingVectorRecord]
+    dimension: int
+    is_ready: bool
+
+    @property
+    def total_items(self) -> int:
+        """Total number of generated vector records."""
+        return len(self.items)
+
+    @property
+    def text_items(self) -> int:
+        """Number of text vector records."""
+        return sum(1 for item in self.items if item.content_type == "text")
+
+    @property
+    def table_items(self) -> int:
+        """Number of table vector records."""
+        return sum(1 for item in self.items if item.content_type == "table")
+
+    @property
+    def image_items(self) -> int:
+        """Number of image vector records."""
+        return sum(1 for item in self.items if item.content_type == "image")
+
+    def get_vectors_by_type(self, content_type: str) -> list[EmbeddingVectorRecord]:
+        """Filter embedding vector records by content type ('text', 'table', 'image')."""
+        return [item for item in self.items if item.content_type == content_type]
+
+    def get_vectors_on_page(self, page_number: int) -> list[EmbeddingVectorRecord]:
+        """Filter embedding vector records by 1-indexed page number."""
+        return [item for item in self.items if item.page_number == page_number]
+
+
+
 
 
 
