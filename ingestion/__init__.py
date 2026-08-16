@@ -5,7 +5,7 @@ Provides PDF parsing, text extraction, table extraction, image extraction,
 unified document ingestion pipeline, document chunking, chunk validation,
 normalization, embedding preparation, embedding generation, Qdrant vector store integration,
 similarity retrieval, retrieval result processing, retrieval service layer, end-to-end ingestion service,
-pipeline status tracking, structured error handling, and document metadata generation.
+pipeline status tracking, structured error handling, pipeline configuration, and ingestion metrics.
 """
 
 from ingestion.chunk_validator import normalize_chunks, validate_chunks
@@ -26,6 +26,7 @@ from ingestion.ingestion_errors import (
     IngestionPipelineError,
     IngestionValidationError,
 )
+from ingestion.ingestion_metrics import IngestionMetrics, StageMetrics
 from ingestion.ingestion_service import run_ingestion
 from ingestion.ingestion_status import (
     IngestionStatus,
@@ -90,6 +91,9 @@ __all__ = [
     "PipelineStage",
     # Configuration
     "IngestionConfig",
+    # Metrics
+    "IngestionMetrics",
+    "StageMetrics",
     # Data models
     "IngestionResult",
     "ChunkingResult",

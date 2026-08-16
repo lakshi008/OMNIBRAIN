@@ -4,6 +4,8 @@ End-to-end ingestion service for the OmniBrain ingestion pipeline.
 Orchestrates the entire document ingestion workflow from raw PDF to embedding generation:
 PDF Validation -> Multi-Modal Extraction -> Document Chunking -> Normalization & Validation ->
 Embedding Preparation -> Embedding Generation.
+
+Integrates Day 14 structured error handling, Day 15 configuration, and Day 16 metrics.
 """
 
 from __future__ import annotations
@@ -24,9 +26,9 @@ from ingestion.ingestion_errors import (
     IngestionChunkingError,
     IngestionEmbeddingError,
     IngestionExtractionError,
-    IngestionPipelineError,
     IngestionValidationError,
 )
+from ingestion.ingestion_metrics import IngestionMetrics
 from ingestion.ingestion_status import (
     IngestionStatus,
     PipelineStage,
@@ -46,8 +48,12 @@ def run_ingestion(
     chunk_overlap: int | object = _UNSET,
     config: IngestionConfig | None = None,
     status_tracker: IngestionStatus | None = None,
+    metrics: IngestionMetrics | None = None,
 ) -> EmbeddingGenerationResult:
-    """Execute the complete end-to-end document ingestion pipeline with stage tracking.
+    """Execute the complete end-to-end document ingestion pipeline.
+
+    Integrates Day 14 structured error handling, Day 15 configuration, and
+    Day 16 per-stage metrics tracking.
 
     Configuration precedence (highest to lowest):
     1. Explicit ``chunk_size`` / ``chunk_overlap`` keyword arguments.
@@ -72,6 +78,7 @@ def run_ingestion(
         config: Optional IngestionConfig providing chunking and other pipeline settings.
             Defaults to IngestionConfig() when not provided.
         status_tracker: Optional IngestionStatus instance to track stage progression.
+        metrics: Optional IngestionMetrics instance to record timing and counters.
 
     Returns:
         EmbeddingGenerationResult containing all generated vector records, dimension, and lineage.
@@ -94,9 +101,15 @@ def run_ingestion(
         chunk_overlap if chunk_overlap is not _UNSET else effective_config.chunk_overlap  # type: ignore[assignment]
     )
 
+    # Status tracker (Day 14)
     tracker = status_tracker or IngestionStatus()
     if tracker.status == PipelineStatus.PENDING:
         tracker.start(stage=PipelineStage.EXTRACTION)
+
+    # Metrics tracker (Day 16)
+    m = metrics
+    if m is not None:
+        m.start_pipeline()
 
     try:
         # 1. Validate chunk configuration
@@ -110,6 +123,8 @@ def run_ingestion(
                 stage="VALIDATION",
             )
             tracker.fail(err.message, original_error=err)
+            if m is not None:
+                m.finish_pipeline(success=False, error=err.message)
             raise err
 
         if (
@@ -122,6 +137,8 @@ def run_ingestion(
                 stage="VALIDATION",
             )
             tracker.fail(err.message, original_error=err)
+            if m is not None:
+                m.finish_pipeline(success=False, error=err.message)
             raise err
 
         if effective_chunk_overlap >= effective_chunk_size:
@@ -131,6 +148,8 @@ def run_ingestion(
                 stage="VALIDATION",
             )
             tracker.fail(err.message, original_error=err)
+            if m is not None:
+                m.finish_pipeline(success=False, error=err.message)
             raise err
 
         # 2. Validate embedding provider interface
@@ -140,17 +159,33 @@ def run_ingestion(
         ):
             err_msg = "Invalid embedding provider: must implement 'embed' or 'embed_batch' method."
             tracker.fail(err_msg)
+            if m is not None:
+                m.finish_pipeline(success=False, error=err_msg)
             raise TypeError(err_msg)
 
         # 3. Validate & Extract PDF
         try:
-            validated_path = validate_pdf(pdf_path)
-            tracker.filename = validated_path.name
-            ingestion_result = ingest_pdf(validated_path)
-            tracker.document_id = ingestion_result.metadata.document_id
+            if m is not None:
+                with m.track_stage("EXTRACTION"):
+                    validated_path = validate_pdf(pdf_path)
+                    tracker.filename = validated_path.name
+                    ingestion_result = ingest_pdf(validated_path)
+                    tracker.document_id = ingestion_result.metadata.document_id
+                    if m is not None:
+                        m.document_id = ingestion_result.metadata.document_id
+                        m.filename = validated_path.name
+            else:
+                validated_path = validate_pdf(pdf_path)
+                tracker.filename = validated_path.name
+                ingestion_result = ingest_pdf(validated_path)
+                tracker.document_id = ingestion_result.metadata.document_id
         except (PDFNotFoundError, InvalidFileTypeError, CorruptedPDFError) as e:
             tracker.fail(str(e), original_error=e)
+            if m is not None and m.status != "FAILED":
+                m.finish_pipeline(success=False, error=str(e))
             raise e
+        except IngestionValidationError:
+            raise
         except Exception as e:
             err = IngestionExtractionError(
                 f"PDF extraction failed: {e}",
@@ -158,16 +193,29 @@ def run_ingestion(
                 original_error=e,
             )
             tracker.fail(err.message, original_error=e)
+            if m is not None and m.status != "FAILED":
+                m.finish_pipeline(success=False, error=err.message)
             raise err from e
 
         # 4. Chunk document content
         tracker.advance_stage(PipelineStage.CHUNKING)
         try:
-            chunking_result = chunk_document(
-                document=ingestion_result,
-                chunk_size=effective_chunk_size,
-                chunk_overlap=effective_chunk_overlap,
-            )
+            if m is not None:
+                with m.track_stage("CHUNKING"):
+                    chunking_result = chunk_document(
+                        document=ingestion_result,
+                        chunk_size=effective_chunk_size,
+                        chunk_overlap=effective_chunk_overlap,
+                    )
+                    m.record_chunks(chunking_result)
+            else:
+                chunking_result = chunk_document(
+                    document=ingestion_result,
+                    chunk_size=effective_chunk_size,
+                    chunk_overlap=effective_chunk_overlap,
+                )
+        except IngestionChunkingError:
+            raise
         except Exception as e:
             err = IngestionChunkingError(
                 f"Document chunking failed: {e}",
@@ -175,14 +223,26 @@ def run_ingestion(
                 original_error=e,
             )
             tracker.fail(err.message, original_error=e)
+            if m is not None and m.status != "FAILED":
+                m.finish_pipeline(success=False, error=err.message)
             raise err from e
 
-        # 5. Normalization & Validation
+        # 5. Normalization
         tracker.advance_stage(PipelineStage.NORMALIZATION)
-        normalized_chunks = normalize_chunks(chunking_result.chunks)
+        if m is not None:
+            with m.track_stage("NORMALIZATION"):
+                normalized_chunks = normalize_chunks(chunking_result.chunks)
+        else:
+            normalized_chunks = normalize_chunks(chunking_result.chunks)
 
+        # 6. Validation
         tracker.advance_stage(PipelineStage.VALIDATION)
-        validation_result = validate_chunks(normalized_chunks)
+        if m is not None:
+            with m.track_stage("VALIDATION"):
+                validation_result = validate_chunks(normalized_chunks)
+        else:
+            validation_result = validate_chunks(normalized_chunks)
+
         if not validation_result.is_valid:
             err = IngestionValidationError(
                 f"Chunk validation failed with {len(validation_result.errors)} error(s): "
@@ -190,12 +250,20 @@ def run_ingestion(
                 stage="VALIDATION",
             )
             tracker.fail(err.message, original_error=err)
+            if m is not None:
+                m.finish_pipeline(success=False, error=err.message)
             raise err
 
-        # 6. Prepare validated chunks for embedding
+        # 7. Prepare validated chunks for embedding
         tracker.advance_stage(PipelineStage.EMBEDDING_PREPARATION)
         try:
-            prepared_result = prepare_for_embedding(normalized_chunks)
+            if m is not None:
+                with m.track_stage("EMBEDDING_PREPARATION"):
+                    prepared_result = prepare_for_embedding(normalized_chunks)
+            else:
+                prepared_result = prepare_for_embedding(normalized_chunks)
+        except IngestionEmbeddingError:
+            raise
         except Exception as e:
             err = IngestionEmbeddingError(
                 f"Embedding preparation failed: {e}",
@@ -203,15 +271,27 @@ def run_ingestion(
                 original_error=e,
             )
             tracker.fail(err.message, original_error=e)
+            if m is not None and m.status != "FAILED":
+                m.finish_pipeline(success=False, error=err.message)
             raise err from e
 
-        # 7. Generate dense embeddings via provider
+        # 8. Generate dense embeddings via provider
         tracker.advance_stage(PipelineStage.EMBEDDING_GENERATION)
         try:
-            generation_result = generate_embeddings(
-                items=prepared_result,
-                provider=embedding_provider,
-            )
+            if m is not None:
+                with m.track_stage("EMBEDDING_GENERATION"):
+                    generation_result = generate_embeddings(
+                        items=prepared_result,
+                        provider=embedding_provider,
+                    )
+                    m.record_embeddings(generation_result)
+            else:
+                generation_result = generate_embeddings(
+                    items=prepared_result,
+                    provider=embedding_provider,
+                )
+        except IngestionEmbeddingError:
+            raise
         except Exception as e:
             err = IngestionEmbeddingError(
                 f"Embedding generation failed: {e}",
@@ -219,13 +299,20 @@ def run_ingestion(
                 original_error=e,
             )
             tracker.fail(err.message, original_error=e)
+            if m is not None and m.status != "FAILED":
+                m.finish_pipeline(success=False, error=err.message)
             raise err from e
 
-        # 8. Mark pipeline complete
+        # 9. Mark pipeline complete
         tracker.complete()
+        if m is not None:
+            m.finish_pipeline(success=True)
+
         return generation_result
 
     except Exception:
         if tracker.status != PipelineStatus.FAILED:
             tracker.status = PipelineStatus.FAILED
+        if m is not None and m.status not in ("COMPLETED", "FAILED"):
+            m.finish_pipeline(success=False, error="Unexpected pipeline failure.")
         raise
