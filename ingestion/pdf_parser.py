@@ -6,22 +6,18 @@ def extract_text_and_images(
     pdf_path: str,
     image_output_dir: str = "data/processed/images",
 ) -> dict:
-    """
-    Extract text and embedded images from every page of a PDF.
-
-    Returns:
-        A dictionary containing document metadata and page data.
-    """
 
     document = pymupdf.open(pdf_path)
 
-    # Document-level metadata
+    filename = Path(pdf_path).name
+    document_id = Path(pdf_path).stem.replace(" ", "_")
+
     document_metadata = {
-        "filename": Path(pdf_path).name,
+        "filename": filename,
+        "document_id": document_id,
         "total_pages": len(document),
     }
 
-    # Create image output directory
     image_output_path = Path(image_output_dir)
     image_output_path.mkdir(parents=True, exist_ok=True)
 
@@ -29,11 +25,9 @@ def extract_text_and_images(
 
     for page_number, page in enumerate(document, start=1):
 
-        # Extract text
         text = page.get_text("text")
         clean_text = text.strip()
 
-        # Extract images
         images = []
 
         for image_index, image_info in enumerate(
@@ -43,17 +37,15 @@ def extract_text_and_images(
 
             image_data = document.extract_image(xref)
 
-            image_bytes = image_data["image"]
-            image_extension = image_data["ext"]
-
             image_filename = (
-                f"page_{page_number}_img_{image_index}.{image_extension}"
+                f"page_{page_number}_img_{image_index}."
+                f"{image_data['ext']}"
             )
 
             image_path = image_output_path / image_filename
 
             with open(image_path, "wb") as image_file:
-                image_file.write(image_bytes)
+                image_file.write(image_data["image"])
 
             images.append(
                 {
@@ -62,9 +54,9 @@ def extract_text_and_images(
                 }
             )
 
-        # Store page information
         pages.append(
             {
+                "page_id": f"{document_id}_page_{page_number}",
                 "page": page_number,
                 "text": clean_text,
                 "images": images,
