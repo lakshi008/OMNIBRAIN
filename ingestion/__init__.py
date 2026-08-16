@@ -4,7 +4,8 @@ OmniBrain Ingestion Pipeline.
 Provides PDF parsing, text extraction, table extraction, image extraction,
 unified document ingestion pipeline, document chunking, chunk validation,
 normalization, embedding preparation, embedding generation, Qdrant vector store integration,
-similarity retrieval, retrieval result processing, retrieval service layer, and document metadata generation.
+similarity retrieval, retrieval result processing, retrieval service layer, end-to-end ingestion service,
+and document metadata generation.
 """
 
 from ingestion.chunk_validator import normalize_chunks, validate_chunks
@@ -16,6 +17,7 @@ from ingestion.exceptions import (
     InvalidFileTypeError,
     PDFNotFoundError,
 )
+from ingestion.ingestion_service import run_ingestion
 from ingestion.models import (
     ChunkValidationResult,
     ChunkingResult,
@@ -49,7 +51,7 @@ from ingestion.retrieval_processor import (
 from ingestion.retrieval_service import retrieve_context
 
 __all__ = [
-    # Core pipeline, extractors, chunker, validator, preparation, generator, store, retrieval, processor & service
+    # Core pipeline, extractors, chunker, validator, preparation, generator, store, retrieval, processor, services
     "ingest_pdf",
     "extract_text",
     "extract_tables",
@@ -66,6 +68,7 @@ __all__ = [
     "process_retrieval_results",
     "build_retrieval_context",
     "retrieve_context",
+    "run_ingestion",
     "validate_pdf",
     # Data models
     "IngestionResult",
