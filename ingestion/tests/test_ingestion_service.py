@@ -396,3 +396,62 @@ class TestValidationAndErrorHandling:
         broken = BrokenEmbeddingProvider()
         with pytest.raises(ValueError, match="Inconsistent vector dimension"):
             run_ingestion(text_only_pdf, broken)
+
+
+# ── Status Tracking Integration Tests ────────────────────────────────────
+
+
+class TestServiceStatusTracking:
+    """Tests verifying IngestionStatus tracking integration with run_ingestion."""
+
+    def test_successful_ingestion_updates_status_tracker(
+        self, text_only_pdf: Path, provider: DeterministicTestEmbeddingProvider
+    ) -> None:
+        """status_tracker records stages and completes in COMPLETED status."""
+        from ingestion.ingestion_status import IngestionStatus, PipelineStage, PipelineStatus
+
+        tracker = IngestionStatus()
+        result = run_ingestion(text_only_pdf, provider, status_tracker=tracker)
+
+        assert tracker.status == PipelineStatus.COMPLETED
+        assert tracker.current_stage == PipelineStage.COMPLETED
+        assert tracker.error is None
+        assert tracker.filename == "text_only.pdf"
+        assert tracker.document_id == result.document_id
+        assert PipelineStage.EXTRACTION in tracker.completed_stages
+        assert PipelineStage.CHUNKING in tracker.completed_stages
+        assert PipelineStage.NORMALIZATION in tracker.completed_stages
+        assert PipelineStage.VALIDATION in tracker.completed_stages
+        assert PipelineStage.EMBEDDING_PREPARATION in tracker.completed_stages
+        assert PipelineStage.EMBEDDING_GENERATION in tracker.completed_stages
+
+    def test_failed_extraction_marks_tracker_failed(
+        self, tmp_path: Path, provider: DeterministicTestEmbeddingProvider
+    ) -> None:
+        """When extraction fails, status_tracker transitions to FAILED."""
+        from ingestion.ingestion_errors import IngestionExtractionError
+        from ingestion.ingestion_status import IngestionStatus, PipelineStatus
+
+        tracker = IngestionStatus()
+        with pytest.raises(IngestionExtractionError):
+            run_ingestion(tmp_path / "missing.pdf", provider, status_tracker=tracker)
+
+        assert tracker.status == PipelineStatus.FAILED
+        assert tracker.error is not None
+
+    def test_failed_embedding_marks_tracker_failed(
+        self, text_only_pdf: Path
+    ) -> None:
+        """When embedding provider fails, status_tracker transitions to FAILED."""
+        from ingestion.ingestion_errors import IngestionEmbeddingError
+        from ingestion.ingestion_status import IngestionStatus, PipelineStage, PipelineStatus
+
+        broken = BrokenEmbeddingProvider()
+        tracker = IngestionStatus()
+        with pytest.raises(IngestionEmbeddingError):
+            run_ingestion(text_only_pdf, broken, status_tracker=tracker)
+
+        assert tracker.status == PipelineStatus.FAILED
+        assert tracker.current_stage == PipelineStage.EMBEDDING_GENERATION
+        assert tracker.error is not None
+
