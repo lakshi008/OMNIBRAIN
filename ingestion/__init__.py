@@ -6,7 +6,7 @@ unified document ingestion pipeline, document chunking, chunk validation,
 normalization, embedding preparation, embedding generation, Qdrant vector store integration,
 similarity retrieval, retrieval result processing, retrieval service layer, end-to-end ingestion service,
 pipeline status tracking, structured error handling, pipeline configuration, ingestion metrics,
-and health/readiness checks.
+health/readiness checks, and pipeline contract/lineage validation.
 """
 
 from ingestion.chunk_validator import normalize_chunks, validate_chunks
@@ -39,6 +39,14 @@ from ingestion.ingestion_status import (
     IngestionStatus,
     PipelineStage,
     PipelineStatus,
+)
+from ingestion.ingestion_validation import (
+    IngestionValidationResult,
+    validate_chunk_contracts,
+    validate_embedding_contracts,
+    validate_pipeline_contracts,
+    validate_pipeline_lineage,
+    validate_search_result_contracts,
 )
 from ingestion.models import (
     ChunkValidationResult,
@@ -108,6 +116,13 @@ __all__ = [
     "IngestionHealthResult",
     "check_ingestion_health",
     "check_ingestion_readiness",
+    # Validation & Contracts
+    "IngestionValidationResult",
+    "validate_chunk_contracts",
+    "validate_embedding_contracts",
+    "validate_search_result_contracts",
+    "validate_pipeline_lineage",
+    "validate_pipeline_contracts",
     # Data models
     "IngestionResult",
     "ChunkingResult",
