@@ -26,6 +26,7 @@ from ingestion.ingestion_errors import (
     IngestionPipelineError,
     IngestionValidationError,
 )
+from ingestion.ingestion_logging import IngestionLogger, get_ingestion_logger
 from ingestion.ingestion_metrics import IngestionMetrics, StageMetrics
 from ingestion.ingestion_service import run_ingestion
 from ingestion.ingestion_status import (
@@ -94,6 +95,9 @@ __all__ = [
     # Metrics
     "IngestionMetrics",
     "StageMetrics",
+    # Logging
+    "IngestionLogger",
+    "get_ingestion_logger",
     # Data models
     "IngestionResult",
     "ChunkingResult",
