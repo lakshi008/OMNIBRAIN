@@ -17,6 +17,7 @@ from ingestion.exceptions import (
     InvalidFileTypeError,
     PDFNotFoundError,
 )
+from ingestion.ingestion_config import IngestionConfig
 from ingestion.ingestion_errors import (
     IngestionChunkingError,
     IngestionEmbeddingError,
@@ -87,6 +88,8 @@ __all__ = [
     "IngestionStatus",
     "PipelineStatus",
     "PipelineStage",
+    # Configuration
+    "IngestionConfig",
     # Data models
     "IngestionResult",
     "ChunkingResult",

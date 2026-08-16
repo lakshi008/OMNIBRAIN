@@ -19,6 +19,7 @@ from ingestion.exceptions import (
     InvalidFileTypeError,
     PDFNotFoundError,
 )
+from ingestion.ingestion_config import IngestionConfig
 from ingestion.ingestion_errors import (
     IngestionChunkingError,
     IngestionEmbeddingError,
@@ -35,15 +36,23 @@ from ingestion.models import EmbeddingGenerationResult
 from ingestion.pdf_ingestion_pipeline import ingest_pdf
 from ingestion.pdf_text_extractor import validate_pdf
 
+_UNSET = object()  # sentinel for detecting when chunk_size/overlap are not passed
+
 
 def run_ingestion(
     pdf_path: str | Path,
     embedding_provider: EmbeddingProvider,
-    chunk_size: int = 1000,
-    chunk_overlap: int = 200,
+    chunk_size: int | object = _UNSET,
+    chunk_overlap: int | object = _UNSET,
+    config: IngestionConfig | None = None,
     status_tracker: IngestionStatus | None = None,
 ) -> EmbeddingGenerationResult:
     """Execute the complete end-to-end document ingestion pipeline with stage tracking.
+
+    Configuration precedence (highest to lowest):
+    1. Explicit ``chunk_size`` / ``chunk_overlap`` keyword arguments.
+    2. Values from the provided ``config`` (IngestionConfig).
+    3. IngestionConfig defaults (chunk_size=1000, chunk_overlap=200).
 
     Workflow stages:
     1. Validates the PDF file existence, format, and structure.
@@ -57,46 +66,68 @@ def run_ingestion(
         pdf_path: Path to the target PDF document.
         embedding_provider: Instance implementing the EmbeddingProvider interface.
         chunk_size: Target size for text chunking in characters (> 0).
+            Overrides config.chunk_size when provided.
         chunk_overlap: Overlap between consecutive text chunks (>= 0 and < chunk_size).
-        status_tracker: Optional IngestionStatus instance to track progression.
+            Overrides config.chunk_overlap when provided.
+        config: Optional IngestionConfig providing chunking and other pipeline settings.
+            Defaults to IngestionConfig() when not provided.
+        status_tracker: Optional IngestionStatus instance to track stage progression.
 
     Returns:
         EmbeddingGenerationResult containing all generated vector records, dimension, and lineage.
 
     Raises:
         IngestionValidationError / ValueError: If chunk configuration is invalid.
-        IngestionPipelineError / TypeError: If embedding provider is invalid.
+        TypeError: If embedding provider is invalid.
         IngestionExtractionError / PDFNotFoundError / InvalidFileTypeError / CorruptedPDFError:
             If PDF validation or extraction fails.
         IngestionChunkingError: If chunking document content fails.
         IngestionValidationError: If chunk validation fails.
         IngestionEmbeddingError: If embedding preparation or generation fails.
     """
+    # Resolve configuration: explicit args > config > defaults
+    effective_config = config if config is not None else IngestionConfig()
+    effective_chunk_size: int = (
+        chunk_size if chunk_size is not _UNSET else effective_config.chunk_size  # type: ignore[assignment]
+    )
+    effective_chunk_overlap: int = (
+        chunk_overlap if chunk_overlap is not _UNSET else effective_config.chunk_overlap  # type: ignore[assignment]
+    )
+
     tracker = status_tracker or IngestionStatus()
     if tracker.status == PipelineStatus.PENDING:
         tracker.start(stage=PipelineStage.EXTRACTION)
 
     try:
         # 1. Validate chunk configuration
-        if not isinstance(chunk_size, int) or isinstance(chunk_size, bool) or chunk_size <= 0:
+        if (
+            not isinstance(effective_chunk_size, int)
+            or isinstance(effective_chunk_size, bool)
+            or effective_chunk_size <= 0
+        ):
             err = IngestionValidationError(
-                f"chunk_size must be a positive integer > 0, got {chunk_size!r}.",
+                f"chunk_size must be a positive integer > 0, got {effective_chunk_size!r}.",
                 stage="VALIDATION",
             )
             tracker.fail(err.message, original_error=err)
             raise err
 
-        if not isinstance(chunk_overlap, int) or isinstance(chunk_overlap, bool) or chunk_overlap < 0:
+        if (
+            not isinstance(effective_chunk_overlap, int)
+            or isinstance(effective_chunk_overlap, bool)
+            or effective_chunk_overlap < 0
+        ):
             err = IngestionValidationError(
-                f"chunk_overlap must be a non-negative integer >= 0, got {chunk_overlap!r}.",
+                f"chunk_overlap must be a non-negative integer >= 0, got {effective_chunk_overlap!r}.",
                 stage="VALIDATION",
             )
             tracker.fail(err.message, original_error=err)
             raise err
 
-        if chunk_overlap >= chunk_size:
+        if effective_chunk_overlap >= effective_chunk_size:
             err = IngestionValidationError(
-                f"chunk_overlap ({chunk_overlap}) must be strictly less than chunk_size ({chunk_size}).",
+                f"chunk_overlap ({effective_chunk_overlap}) must be strictly less than "
+                f"chunk_size ({effective_chunk_size}).",
                 stage="VALIDATION",
             )
             tracker.fail(err.message, original_error=err)
@@ -134,8 +165,8 @@ def run_ingestion(
         try:
             chunking_result = chunk_document(
                 document=ingestion_result,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
+                chunk_size=effective_chunk_size,
+                chunk_overlap=effective_chunk_overlap,
             )
         except Exception as e:
             err = IngestionChunkingError(
