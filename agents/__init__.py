@@ -17,6 +17,7 @@ from agents.models import (
     AgentResponse,
     AgentState,
     SearchRequest,
+    SearchResult,
 )
 from agents.search_agent import SearchAgent
 
@@ -27,6 +28,7 @@ __all__ = [
     "AgentResponse",
     "AgentCitation",
     "AgentState",
+    "SearchResult",
     # Agents
     "SearchAgent",
     # Domain Exceptions

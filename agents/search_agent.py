@@ -12,7 +12,13 @@ import math
 from typing import Any
 
 from agents.exceptions import AgentExecutionError, AgentValidationError
-from agents.models import AgentCitation, AgentRequest, AgentResponse, SearchRequest
+from agents.models import (
+    AgentCitation,
+    AgentRequest,
+    AgentResponse,
+    SearchRequest,
+    SearchResult,
+)
 from ingestion.embedding_generator import EmbeddingProvider
 from ingestion.models import RetrievalServiceResult, VectorSearchResult
 from ingestion.qdrant_store import QdrantVectorStore
@@ -554,6 +560,7 @@ class SearchAgent:
         final_text = sum(1 for r in filtered_results if r.content_type == "text")
         final_table = sum(1 for r in filtered_results if r.content_type == "table")
         final_image = sum(1 for r in filtered_results if r.content_type == "image")
+        unique_docs = sorted(list({r.document_id for r in filtered_results}))
 
         response_metadata: dict[str, Any] = {
             **request_metadata,
@@ -562,6 +569,10 @@ class SearchAgent:
             "total_results": len(filtered_results),
             "evidence_count": len(filtered_results),
             "has_evidence": len(filtered_results) > 0,
+            "has_results": len(filtered_results) > 0,
+            "search_status": "RESULTS_FOUND" if len(filtered_results) > 0 else "NO_RESULTS",
+            "unique_document_count": len(unique_docs),
+            "unique_documents": unique_docs,
             "text_results": final_text,
             "table_results": final_table,
             "image_results": final_image,
@@ -586,6 +597,34 @@ class SearchAgent:
             metadata=response_metadata,
             error=None,
         )
+
+    def package_result(self, response: AgentResponse) -> SearchResult:
+        """Package an AgentResponse into a downstream-ready SearchResult contract.
+
+        Args:
+            response: AgentResponse instance produced by this agent.
+
+        Returns:
+            Validated SearchResult instance.
+        """
+        return SearchResult.from_response(response)
+
+    def search_and_package(
+        self,
+        request: str | AgentRequest | SearchRequest,
+        **kwargs: Any,
+    ) -> SearchResult:
+        """Execute search and package the response directly into a SearchResult contract.
+
+        Args:
+            request: Query string, AgentRequest, or SearchRequest.
+            **kwargs: Optional runtime overrides (top_k, min_score, max_results, collection_name).
+
+        Returns:
+            Validated SearchResult instance.
+        """
+        response = self.search(request, **kwargs)
+        return SearchResult.from_response(response)
 
     def __call__(
         self,

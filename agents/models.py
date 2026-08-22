@@ -451,6 +451,36 @@ class AgentResponse:
         """Whether the response indicates an error or failure."""
         return self.status == "error" or self.error is not None
 
+    @property
+    def has_results(self) -> bool:
+        """Whether the response has at least one source citation (alias for has_citations)."""
+        return len(self.citations) > 0
+
+    @property
+    def text_results(self) -> list[AgentCitation]:
+        """List of citations with content_type == 'text'."""
+        return [c for c in self.citations if c.content_type == "text"]
+
+    @property
+    def table_results(self) -> list[AgentCitation]:
+        """List of citations with content_type == 'table'."""
+        return [c for c in self.citations if c.content_type == "table"]
+
+    @property
+    def image_results(self) -> list[AgentCitation]:
+        """List of citations with content_type == 'image'."""
+        return [c for c in self.citations if c.content_type == "image"]
+
+    @property
+    def unique_document_count(self) -> int:
+        """Count of unique document_ids across citations."""
+        return len({c.document_id for c in self.citations})
+
+    @property
+    def unique_documents(self) -> list[str]:
+        """Sorted list of unique document_ids across citations."""
+        return sorted(list({c.document_id for c in self.citations}))
+
     def to_dict(self) -> dict[str, Any]:
         """Convert response to dictionary representation."""
         return {
@@ -496,6 +526,214 @@ class AgentResponse:
             metadata=data.get("metadata", {}),
             error=data.get("error"),
         )
+
+
+@dataclass
+class SearchResult:
+    """Packaged search result contract for downstream agent and supervisor consumption.
+
+    Encapsulates validated, ranked citations, structured context, modality grouping,
+    and document lineage summary without LLM-generated answers.
+
+    Attributes:
+        query: Original search query string.
+        status: Deterministic search status ('RESULTS_FOUND' or 'NO_RESULTS').
+        citations: List of validated AgentCitation objects in descending relevance order.
+        context: Structured, citation-numbered textual context block.
+        metadata: Optional metadata dictionary from search execution.
+    """
+
+    query: str
+    status: str = "NO_RESULTS"
+    citations: list[AgentCitation] = field(default_factory=list)
+    context: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate packaged search result fields."""
+        if not isinstance(self.query, str):
+            raise AgentValidationError(f"query must be a string, got {type(self.query).__name__}.")
+        if not self.query.strip():
+            raise AgentValidationError("query cannot be empty or whitespace-only.")
+
+        if not isinstance(self.status, str) or not self.status.strip():
+            raise AgentValidationError("status must be a non-empty string.")
+
+        if not isinstance(self.citations, list):
+            raise AgentValidationError("citations must be a list.")
+
+        for idx, citation in enumerate(self.citations):
+            if not isinstance(citation, AgentCitation):
+                raise AgentValidationError(
+                    f"Item at index {idx} of citations is not an AgentCitation: got {type(citation).__name__}."
+                )
+
+        if not isinstance(self.context, str):
+            raise AgentValidationError("context must be a string.")
+
+        if not isinstance(self.metadata, (dict, Mapping)):
+            raise AgentValidationError("metadata must be a dictionary.")
+
+        self.metadata = dict(self.metadata)
+
+    @property
+    def has_results(self) -> bool:
+        """Whether any evidence citations were found."""
+        return len(self.citations) > 0
+
+    @property
+    def total_results(self) -> int:
+        """Total number of accepted evidence citations."""
+        return len(self.citations)
+
+    @property
+    def evidence_count(self) -> int:
+        """Total number of accepted evidence citations (alias for total_results)."""
+        return len(self.citations)
+
+    @property
+    def text_results(self) -> list[AgentCitation]:
+        """List of citations with content_type == 'text'."""
+        return [c for c in self.citations if c.content_type == "text"]
+
+    @property
+    def table_results(self) -> list[AgentCitation]:
+        """List of citations with content_type == 'table'."""
+        return [c for c in self.citations if c.content_type == "table"]
+
+    @property
+    def image_results(self) -> list[AgentCitation]:
+        """List of citations with content_type == 'image'."""
+        return [c for c in self.citations if c.content_type == "image"]
+
+    @property
+    def text_count(self) -> int:
+        """Count of text citations."""
+        return len(self.text_results)
+
+    @property
+    def table_count(self) -> int:
+        """Count of table citations."""
+        return len(self.table_results)
+
+    @property
+    def image_count(self) -> int:
+        """Count of image citations."""
+        return len(self.image_results)
+
+    @property
+    def unique_document_count(self) -> int:
+        """Count of distinct document_id values represented across citations."""
+        return len({c.document_id for c in self.citations})
+
+    @property
+    def unique_documents(self) -> list[str]:
+        """Sorted list of distinct document_id values represented across citations."""
+        return sorted(list({c.document_id for c in self.citations}))
+
+    @property
+    def by_document(self) -> dict[str, list[AgentCitation]]:
+        """Dictionary mapping each unique document_id to its citations in rank order."""
+        grouped: dict[str, list[AgentCitation]] = {}
+        for c in self.citations:
+            grouped.setdefault(c.document_id, []).append(c)
+        return grouped
+
+    @property
+    def by_modality(self) -> dict[str, list[AgentCitation]]:
+        """Dictionary mapping modality name to its citations in rank order."""
+        return {
+            "text": self.text_results,
+            "table": self.table_results,
+            "image": self.image_results,
+        }
+
+    @classmethod
+    def from_response(cls, response: AgentResponse) -> SearchResult:
+        """Construct a SearchResult from an AgentResponse produced by SearchAgent.
+
+        Args:
+            response: AgentResponse instance.
+
+        Returns:
+            Validated SearchResult package.
+
+        Raises:
+            AgentValidationError: If response is invalid or missing required metadata.
+        """
+        if not isinstance(response, AgentResponse):
+            raise AgentValidationError(
+                f"Expected AgentResponse instance, got {type(response).__name__}."
+            )
+
+        query = response.metadata.get("query", "")
+        if not query or not isinstance(query, str) or not query.strip():
+            raise AgentValidationError("AgentResponse metadata missing non-empty 'query'.")
+
+        citations = list(response.citations)
+        context = response.metadata.get("context", "")
+        status = "RESULTS_FOUND" if len(citations) > 0 else "NO_RESULTS"
+
+        return cls(
+            query=query.strip(),
+            status=status,
+            citations=citations,
+            context=context,
+            metadata=dict(response.metadata),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert SearchResult to dictionary representation."""
+        return {
+            "query": self.query,
+            "status": self.status,
+            "citations": [c.to_dict() for c in self.citations],
+            "context": self.context,
+            "total_results": self.total_results,
+            "evidence_count": self.evidence_count,
+            "has_results": self.has_results,
+            "text_count": self.text_count,
+            "table_count": self.table_count,
+            "image_count": self.image_count,
+            "unique_document_count": self.unique_document_count,
+            "unique_documents": self.unique_documents,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SearchResult:
+        """Construct a SearchResult from a dictionary representation.
+
+        Args:
+            data: Dictionary containing search result fields.
+
+        Returns:
+            Validated SearchResult instance.
+        """
+        if not isinstance(data, dict):
+            raise AgentValidationError("Input data must be a dictionary.")
+
+        raw_citations = data.get("citations", [])
+        citations: list[AgentCitation] = []
+        if isinstance(raw_citations, list):
+            for item in raw_citations:
+                if isinstance(item, AgentCitation):
+                    citations.append(item)
+                elif isinstance(item, dict):
+                    citations.append(AgentCitation.from_dict(item))
+                else:
+                    raise AgentValidationError(
+                        f"Invalid citation in data: expected dict or AgentCitation, got {type(item).__name__}."
+                    )
+
+        return cls(
+            query=data.get("query", ""),
+            status=data.get("status", "RESULTS_FOUND" if len(citations) > 0 else "NO_RESULTS"),
+            citations=citations,
+            context=data.get("context", ""),
+            metadata=data.get("metadata", {}),
+        )
+
 
 
 @dataclass

@@ -12,7 +12,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agents.exceptions import AgentExecutionError, AgentValidationError
-from agents.models import AgentCitation, AgentRequest, AgentResponse, SearchRequest
+from agents.models import (
+    AgentCitation,
+    AgentRequest,
+    AgentResponse,
+    SearchRequest,
+    SearchResult,
+)
 from agents.search_agent import SearchAgent
 from ingestion.models import (
     EmbeddingVectorRecord,
@@ -3928,4 +3934,591 @@ class TestDay27QueryToEvidenceContextBuildingAndResponseQuality:
         ctx = SearchAgent._build_evidence_context(items)
         assert "[Source 1]\nFile: f1.pdf\nPage: 1\nType: text\nContent:\nC1" in ctx
         assert "[Source 2]\nFile: f2.pdf\nPage: N/A\nType: table\nContent:\nC2" in ctx
+
+
+# ---------------------------------------------------------------------------
+# Day 28 — Search Result Packaging, Evidence Grouping & Downstream Contract
+# ---------------------------------------------------------------------------
+
+
+class TestDay28SearchResultPackagingAndDownstreamContract:
+    """Day 28 — Comprehensive search result packaging, grouping, and downstream contract tests.
+
+    Covers all 44 required scenarios: result packaging, status indicators,
+    modality grouping (text/table/image), document grouping and counts,
+    contract properties, immutability, determinism, and regression protection.
+    """
+
+    # ------------------------------------------------------------------
+    # Scenario 1 — Result with one citation
+    # ------------------------------------------------------------------
+
+    def test_01_result_with_one_citation(self) -> None:
+        """SearchResult with one citation accurately packages all fields."""
+        cit = AgentCitation(
+            document_id="doc-1",
+            filename="report.pdf",
+            chunk_id="chk-1",
+            page_number=1,
+            content_type="text",
+            score=0.95,
+        )
+        pkg = SearchResult(
+            query="Single citation test",
+            status="RESULTS_FOUND",
+            citations=[cit],
+            context="[Source 1]\nFile: report.pdf\nPage: 1\nType: text\nContent:\n...",
+        )
+        assert pkg.total_results == 1
+        assert pkg.evidence_count == 1
+        assert pkg.has_results is True
+        assert pkg.status == "RESULTS_FOUND"
+        assert pkg.citations[0].chunk_id == "chk-1"
+
+    # ------------------------------------------------------------------
+    # Scenario 2 — Result with multiple citations
+    # ------------------------------------------------------------------
+
+    def test_02_result_with_multiple_citations(self) -> None:
+        """SearchResult with multiple citations retains all citations in order."""
+        c1 = AgentCitation(document_id="doc-1", filename="f1.pdf", chunk_id="c1", score=0.9)
+        c2 = AgentCitation(document_id="doc-2", filename="f2.pdf", chunk_id="c2", score=0.8)
+        pkg = SearchResult(query="Multi test", status="RESULTS_FOUND", citations=[c1, c2])
+
+        assert pkg.total_results == 2
+        assert [c.chunk_id for c in pkg.citations] == ["c1", "c2"]
+
+    # ------------------------------------------------------------------
+    # Scenario 3 — No-result response packaged
+    # ------------------------------------------------------------------
+
+    def test_03_no_result_response_packaged(self) -> None:
+        """SearchResult with zero citations has status NO_RESULTS and empty collections."""
+        pkg = SearchResult(query="No results query", status="NO_RESULTS", citations=[])
+        assert pkg.total_results == 0
+        assert pkg.has_results is False
+        assert pkg.status == "NO_RESULTS"
+        assert pkg.text_results == []
+        assert pkg.table_results == []
+        assert pkg.image_results == []
+
+    # ------------------------------------------------------------------
+    # Scenario 4 — RESULTS_FOUND status
+    # ------------------------------------------------------------------
+
+    def test_04_results_found_status(self) -> None:
+        """SearchResult.from_response assigns RESULTS_FOUND when citations exist."""
+        cit = AgentCitation(document_id="d1", filename="f1.pdf", chunk_id="c1", score=0.88)
+        resp = AgentResponse(
+            answer="",
+            agent_name="SearchAgent",
+            citations=[cit],
+            metadata={"query": "Found query", "context": "[Source 1]..."},
+        )
+        pkg = SearchResult.from_response(resp)
+        assert pkg.status == "RESULTS_FOUND"
+
+    # ------------------------------------------------------------------
+    # Scenario 5 — NO_RESULTS status
+    # ------------------------------------------------------------------
+
+    def test_05_no_results_status(self) -> None:
+        """SearchResult.from_response assigns NO_RESULTS when citations list is empty."""
+        resp = AgentResponse(
+            answer="",
+            agent_name="SearchAgent",
+            citations=[],
+            metadata={"query": "Not found query", "context": ""},
+        )
+        pkg = SearchResult.from_response(resp)
+        assert pkg.status == "NO_RESULTS"
+
+    # ------------------------------------------------------------------
+    # Scenario 6 — has_results=True
+    # ------------------------------------------------------------------
+
+    def test_06_has_results_true(self) -> None:
+        """has_results returns True when at least one citation exists."""
+        cit = AgentCitation(document_id="d1", filename="f1.pdf", chunk_id="c1")
+        pkg = SearchResult(query="query", citations=[cit])
+        assert pkg.has_results is True
+
+    # ------------------------------------------------------------------
+    # Scenario 7 — has_results=False
+    # ------------------------------------------------------------------
+
+    def test_07_has_results_false(self) -> None:
+        """has_results returns False when citations is empty."""
+        pkg = SearchResult(query="query", citations=[])
+        assert pkg.has_results is False
+
+    # ------------------------------------------------------------------
+    # Scenario 8 — total_results
+    # ------------------------------------------------------------------
+
+    def test_08_total_results(self) -> None:
+        """total_results matches len(citations)."""
+        cits = [AgentCitation(document_id="d", filename="f.pdf", chunk_id=f"c{i}") for i in range(5)]
+        pkg = SearchResult(query="query", citations=cits)
+        assert pkg.total_results == 5
+
+    # ------------------------------------------------------------------
+    # Scenario 9 — text_results
+    # ------------------------------------------------------------------
+
+    def test_09_text_results(self) -> None:
+        """text_results filters only text modality citations."""
+        c1 = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c1", content_type="text")
+        c2 = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c2", content_type="table")
+        pkg = SearchResult(query="query", citations=[c1, c2])
+
+        assert len(pkg.text_results) == 1
+        assert pkg.text_results[0].chunk_id == "c1"
+        assert pkg.text_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 10 — table_results
+    # ------------------------------------------------------------------
+
+    def test_10_table_results(self) -> None:
+        """table_results filters only table modality citations."""
+        c1 = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c1", content_type="text")
+        c2 = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c2", content_type="table")
+        pkg = SearchResult(query="query", citations=[c1, c2])
+
+        assert len(pkg.table_results) == 1
+        assert pkg.table_results[0].chunk_id == "c2"
+        assert pkg.table_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 11 — image_results
+    # ------------------------------------------------------------------
+
+    def test_11_image_results(self) -> None:
+        """image_results filters only image modality citations."""
+        c1 = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c1", content_type="image")
+        pkg = SearchResult(query="query", citations=[c1])
+
+        assert len(pkg.image_results) == 1
+        assert pkg.image_results[0].chunk_id == "c1"
+        assert pkg.image_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 12 — mixed multimodal results
+    # ------------------------------------------------------------------
+
+    def test_12_mixed_multimodal_results(self) -> None:
+        """Multimodal results are properly segregated and accessible by modality."""
+        cits = [
+            AgentCitation(document_id="d", filename="f.pdf", chunk_id="t1", content_type="text"),
+            AgentCitation(document_id="d", filename="f.pdf", chunk_id="t2", content_type="text"),
+            AgentCitation(document_id="d", filename="f.pdf", chunk_id="tb1", content_type="table"),
+            AgentCitation(document_id="d", filename="f.pdf", chunk_id="img1", content_type="image"),
+        ]
+        pkg = SearchResult(query="query", citations=cits)
+
+        assert pkg.total_results == 4
+        assert pkg.text_count == 2
+        assert pkg.table_count == 1
+        assert pkg.image_count == 1
+        assert pkg.text_count + pkg.table_count + pkg.image_count == pkg.total_results
+
+    # ------------------------------------------------------------------
+    # Scenario 13 — unique document count
+    # ------------------------------------------------------------------
+
+    def test_13_unique_document_count(self) -> None:
+        """unique_document_count reflects number of distinct document_ids."""
+        cits = [
+            AgentCitation(document_id="doc-A", filename="a.pdf", chunk_id="c1"),
+            AgentCitation(document_id="doc-A", filename="a.pdf", chunk_id="c2"),
+            AgentCitation(document_id="doc-B", filename="b.pdf", chunk_id="c3"),
+        ]
+        pkg = SearchResult(query="query", citations=cits)
+        assert pkg.unique_document_count == 2
+        assert pkg.unique_documents == ["doc-A", "doc-B"]
+
+    # ------------------------------------------------------------------
+    # Scenario 14 — repeated citations from same document counted once
+    # ------------------------------------------------------------------
+
+    def test_14_repeated_citations_from_same_document(self) -> None:
+        """Multiple citations from single document results in unique_document_count=1."""
+        cits = [
+            AgentCitation(document_id="doc-single", filename="s.pdf", chunk_id=f"c{i}")
+            for i in range(4)
+        ]
+        pkg = SearchResult(query="query", citations=cits)
+        assert pkg.unique_document_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 15 — citations from multiple documents
+    # ------------------------------------------------------------------
+
+    def test_15_citations_from_multiple_documents(self) -> None:
+        """by_document groups citations by document_id preserving rank order."""
+        c1 = AgentCitation(document_id="doc-1", filename="1.pdf", chunk_id="c1", score=0.9)
+        c2 = AgentCitation(document_id="doc-2", filename="2.pdf", chunk_id="c2", score=0.8)
+        c3 = AgentCitation(document_id="doc-1", filename="1.pdf", chunk_id="c3", score=0.7)
+        pkg = SearchResult(query="query", citations=[c1, c2, c3])
+
+        by_doc = pkg.by_document
+        assert list(by_doc.keys()) == ["doc-1", "doc-2"]
+        assert [c.chunk_id for c in by_doc["doc-1"]] == ["c1", "c3"]
+        assert [c.chunk_id for c in by_doc["doc-2"]] == ["c2"]
+
+    # ------------------------------------------------------------------
+    # Scenario 16 — citation identity preservation
+    # ------------------------------------------------------------------
+
+    def test_16_citation_identity_preservation(self) -> None:
+        """Citations inside SearchResult are identical to original citations."""
+        cit = AgentCitation(document_id="doc-id", filename="file.pdf", chunk_id="chk-id", score=0.88)
+        pkg = SearchResult(query="query", citations=[cit])
+        assert pkg.citations[0] is cit
+
+    # ------------------------------------------------------------------
+    # Scenario 17 — filename preservation
+    # ------------------------------------------------------------------
+
+    def test_17_filename_preservation(self) -> None:
+        """filename is preserved in citations."""
+        cit = AgentCitation(document_id="d", filename="annual_filing_2023.pdf", chunk_id="c")
+        pkg = SearchResult(query="query", citations=[cit])
+        assert pkg.citations[0].filename == "annual_filing_2023.pdf"
+
+    # ------------------------------------------------------------------
+    # Scenario 18 — page number preservation
+    # ------------------------------------------------------------------
+
+    def test_18_page_number_preservation(self) -> None:
+        """page_number is preserved in citations."""
+        cit = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c", page_number=42)
+        pkg = SearchResult(query="query", citations=[cit])
+        assert pkg.citations[0].page_number == 42
+
+    # ------------------------------------------------------------------
+    # Scenario 19 — chunk ID preservation
+    # ------------------------------------------------------------------
+
+    def test_19_chunk_id_preservation(self) -> None:
+        """chunk_id is preserved in citations."""
+        cit = AgentCitation(document_id="d", filename="f.pdf", chunk_id="chunk-uuid-888")
+        pkg = SearchResult(query="query", citations=[cit])
+        assert pkg.citations[0].chunk_id == "chunk-uuid-888"
+
+    # ------------------------------------------------------------------
+    # Scenario 20 — content type preservation
+    # ------------------------------------------------------------------
+
+    def test_20_content_type_preservation(self) -> None:
+        """content_type is preserved in citations."""
+        cit = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c", content_type="table")
+        pkg = SearchResult(query="query", citations=[cit])
+        assert pkg.citations[0].content_type == "table"
+
+    # ------------------------------------------------------------------
+    # Scenario 21 — score preservation
+    # ------------------------------------------------------------------
+
+    def test_21_score_preservation(self) -> None:
+        """score is preserved in citations."""
+        cit = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c", score=0.8765)
+        pkg = SearchResult(query="query", citations=[cit])
+        assert pkg.citations[0].score == 0.8765
+
+    # ------------------------------------------------------------------
+    # Scenario 22 — metadata preservation
+    # ------------------------------------------------------------------
+
+    def test_22_metadata_preservation(self) -> None:
+        """metadata dict is preserved in citations and package."""
+        cit = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c", metadata={"dept": "eng"})
+        pkg = SearchResult(query="query", citations=[cit], metadata={"search_time_ms": 12.5})
+        assert pkg.citations[0].metadata == {"dept": "eng"}
+        assert pkg.metadata["search_time_ms"] == 12.5
+
+    # ------------------------------------------------------------------
+    # Scenario 23 — context preservation
+    # ------------------------------------------------------------------
+
+    def test_23_context_preservation(self) -> None:
+        """Structured context string is preserved exactly in SearchResult."""
+        context_str = "[Source 1]\nFile: f.pdf\nPage: 1\nType: text\nContent:\nSummary text."
+        pkg = SearchResult(query="query", context=context_str)
+        assert pkg.context == context_str
+
+    # ------------------------------------------------------------------
+    # Scenario 24 — source order preservation
+    # ------------------------------------------------------------------
+
+    def test_24_source_order_preservation(self) -> None:
+        """Order of citations in SearchResult strictly matches input order."""
+        cits = [AgentCitation(document_id=f"d{i}", filename="f.pdf", chunk_id=f"c{i}") for i in range(5)]
+        pkg = SearchResult(query="query", citations=cits)
+        assert [c.chunk_id for c in pkg.citations] == [f"c{i}" for i in range(5)]
+
+    # ------------------------------------------------------------------
+    # Scenario 25 — descending relevance preservation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_25_descending_relevance_preservation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """SearchAgent.search_and_package produces SearchResult in descending score order."""
+        results = [
+            _make_valid_result(chunk_id="c-mid", score=0.6),
+            _make_valid_result(chunk_id="c-high", score=0.9),
+            _make_valid_result(chunk_id="c-low", score=0.3),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Relevance preservation")
+        assert [c.score for c in pkg.citations] == [0.9, 0.6, 0.3]
+
+    # ------------------------------------------------------------------
+    # Scenario 26 — no-result empty context
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_26_no_result_empty_context(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """No result search produces SearchResult with empty context."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Empty query")
+        assert pkg.context == ""
+        assert pkg.status == "NO_RESULTS"
+        assert pkg.has_results is False
+
+    # ------------------------------------------------------------------
+    # Scenario 27 — empty citation list package
+    # ------------------------------------------------------------------
+
+    def test_27_empty_citation_list_package(self) -> None:
+        """SearchResult initialized with empty citations list works cleanly."""
+        pkg = SearchResult(query="valid query", citations=[])
+        assert pkg.citations == []
+        assert pkg.total_results == 0
+
+    # ------------------------------------------------------------------
+    # Scenario 28 — malformed citation handling
+    # ------------------------------------------------------------------
+
+    def test_28_malformed_citation_handling(self) -> None:
+        """Non-AgentCitation in citations list raises AgentValidationError."""
+        with pytest.raises(AgentValidationError, match="not an AgentCitation"):
+            SearchResult(query="valid query", citations=["not_a_citation"])  # type: ignore[list-item]
+
+    # ------------------------------------------------------------------
+    # Scenario 29 — invalid query raises validation error
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("bad_q", ["", "   ", None, 123])
+    def test_29_invalid_query_raises_validation_error(self, bad_q: Any) -> None:
+        """Invalid query raises AgentValidationError on SearchResult init."""
+        with pytest.raises(AgentValidationError):
+            SearchResult(query=bad_q)
+
+    # ------------------------------------------------------------------
+    # Scenario 30 — missing document_id in citation raises validation error
+    # ------------------------------------------------------------------
+
+    def test_30_missing_document_id_raises_validation_error(self) -> None:
+        """Citation with empty document_id raises AgentValidationError."""
+        with pytest.raises(AgentValidationError):
+            AgentCitation(document_id="", filename="f.pdf", chunk_id="c")
+
+    # ------------------------------------------------------------------
+    # Scenario 31 — from_response missing query raises error
+    # ------------------------------------------------------------------
+
+    def test_31_from_response_missing_query_raises_error(self) -> None:
+        """from_response with missing query in metadata raises AgentValidationError."""
+        resp = AgentResponse(answer="", agent_name="SearchAgent", citations=[], metadata={})
+        with pytest.raises(AgentValidationError, match="missing non-empty 'query'"):
+            SearchResult.from_response(resp)
+
+    # ------------------------------------------------------------------
+    # Scenario 32 — deterministic packaging
+    # ------------------------------------------------------------------
+
+    def test_32_deterministic_packaging(self) -> None:
+        """Packaging identical citations yields identical SearchResult."""
+        cit = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c", score=0.9)
+        p1 = SearchResult(query="test", citations=[cit])
+        p2 = SearchResult(query="test", citations=[cit])
+        assert p1.to_dict() == p2.to_dict()
+
+    # ------------------------------------------------------------------
+    # Scenario 33 — repeated packaging gives same result
+    # ------------------------------------------------------------------
+
+    def test_33_repeated_packaging_gives_same_result(self) -> None:
+        """SearchResult.from_response called repeatedly produces identical dicts."""
+        resp = AgentResponse(
+            answer="",
+            agent_name="SearchAgent",
+            citations=[AgentCitation(document_id="d", filename="f.pdf", chunk_id="c")],
+            metadata={"query": "test query"},
+        )
+        r1 = SearchResult.from_response(resp)
+        r2 = SearchResult.from_response(resp)
+        assert r1.to_dict() == r2.to_dict()
+
+    # ------------------------------------------------------------------
+    # Scenario 34 — original citation objects not mutated
+    # ------------------------------------------------------------------
+
+    def test_34_original_citation_objects_not_mutated(self) -> None:
+        """Packaging into SearchResult does not modify the source AgentCitation."""
+        cit = AgentCitation(document_id="d", filename="f.pdf", chunk_id="c", score=0.85)
+        SearchResult(query="test", citations=[cit])
+        assert cit.score == 0.85
+        assert cit.chunk_id == "c"
+
+    # ------------------------------------------------------------------
+    # Scenario 35 — text/table/image counts sum correctly
+    # ------------------------------------------------------------------
+
+    def test_35_text_table_image_counts_sum_correctly(self) -> None:
+        """text_count + table_count + image_count == total_results."""
+        cits = [
+            AgentCitation(document_id="d", filename="f.pdf", chunk_id="t1", content_type="text"),
+            AgentCitation(document_id="d", filename="f.pdf", chunk_id="tb1", content_type="table"),
+            AgentCitation(document_id="d", filename="f.pdf", chunk_id="i1", content_type="image"),
+        ]
+        pkg = SearchResult(query="query", citations=cits)
+        assert pkg.text_count + pkg.table_count + pkg.image_count == pkg.total_results == 3
+
+    # ------------------------------------------------------------------
+    # Scenario 36 — unique document count correctness
+    # ------------------------------------------------------------------
+
+    def test_36_unique_document_count_correctness(self) -> None:
+        """unique_document_count handles multiple documents correctly."""
+        cits = [
+            AgentCitation(document_id="doc-1", filename="f.pdf", chunk_id="c1"),
+            AgentCitation(document_id="doc-2", filename="f.pdf", chunk_id="c2"),
+            AgentCitation(document_id="doc-3", filename="f.pdf", chunk_id="c3"),
+        ]
+        pkg = SearchResult(query="query", citations=cits)
+        assert pkg.unique_document_count == 3
+
+    # ------------------------------------------------------------------
+    # Scenario 37 — no fake citations
+    # ------------------------------------------------------------------
+
+    def test_37_no_fake_citations(self) -> None:
+        """SearchResult citations list contains only provided citations."""
+        pkg = SearchResult(query="query", citations=[])
+        assert len(pkg.citations) == 0
+
+    # ------------------------------------------------------------------
+    # Scenario 38 — no fake metadata
+    # ------------------------------------------------------------------
+
+    def test_38_no_fake_metadata(self) -> None:
+        """Metadata defaults to empty dictionary if not provided."""
+        pkg = SearchResult(query="query")
+        assert pkg.metadata == {}
+
+    # ------------------------------------------------------------------
+    # Scenario 39 — no duplicate retrieval call
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_39_no_duplicate_retrieval_call(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """search_and_package invokes Member 1 retrieve_context exactly once."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search_and_package("single call test")
+        assert mock_retrieve_context.call_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 40 — no duplicate embedding call
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_40_no_duplicate_embedding_call(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """search_and_package calls provider.embed exactly once."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MagicMock()
+        provider.embed.return_value = [0.1, 0.2, 0.3, 0.4]
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search_and_package("single embed call")
+        assert provider.embed.call_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 41 — Member 1 retrieval reused
+    # ------------------------------------------------------------------
+
+    def test_41_member1_retrieval_reused(self) -> None:
+        """SearchAgent reuses Member 1 retrieve_context."""
+        import agents.search_agent as sa
+        from ingestion.retrieval_service import retrieve_context
+
+        assert sa.retrieve_context is retrieve_context
+
+    # ------------------------------------------------------------------
+    # Scenario 42 — Day 26 filtering reused
+    # ------------------------------------------------------------------
+
+    def test_42_day26_filtering_reused(self) -> None:
+        """SearchAgent retains _apply_member2_result_policy method."""
+        assert hasattr(SearchAgent, "_apply_member2_result_policy")
+
+    # ------------------------------------------------------------------
+    # Scenario 43 — Day 27 context reused
+    # ------------------------------------------------------------------
+
+    def test_43_day27_context_reused(self) -> None:
+        """SearchAgent retains _build_evidence_context method."""
+        assert hasattr(SearchAgent, "_build_evidence_context")
+
+    # ------------------------------------------------------------------
+    # Scenario 44 — serialization roundtrip
+    # ------------------------------------------------------------------
+
+    def test_44_serialization_roundtrip(self) -> None:
+        """SearchResult to_dict and from_dict roundtrip cleanly."""
+        cit = AgentCitation(document_id="doc-1", filename="f.pdf", chunk_id="c1", score=0.88)
+        orig = SearchResult(
+            query="roundtrip query",
+            status="RESULTS_FOUND",
+            citations=[cit],
+            context="[Source 1]...",
+            metadata={"source": "agent"},
+        )
+        d = orig.to_dict()
+        restored = SearchResult.from_dict(d)
+
+        assert restored.query == orig.query
+        assert restored.status == orig.status
+        assert restored.context == orig.context
+        assert len(restored.citations) == len(orig.citations)
+        assert restored.citations[0].chunk_id == orig.citations[0].chunk_id
+        assert restored.total_results == orig.total_results
+
 
