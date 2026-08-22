@@ -5959,5 +5959,225 @@ class TestDay30SearchAgentHardeningAndErrorIsolation:
         assert hasattr(SearchAgent, "package_result")
 
 
+# ---------------------------------------------------------------------------
+# Day 31 — Final Search Agent Integration, Contract Audit & Delivery Readiness
+# ---------------------------------------------------------------------------
+
+
+class TestDay31FinalSearchAgentIntegrationAndContractAudit:
+    """Day 31 — Final delivery readiness, integration audit, and contract verification tests.
+
+    Verifies complete end-to-end correctness, compatibility with Member 1,
+    supervisor-ready contract completeness, non-duplication of systems,
+    determinism, and regression protection across all Member 2 layers.
+    """
+
+    # ------------------------------------------------------------------
+    # Audit 1 — Public API exports completeness
+    # ------------------------------------------------------------------
+
+    def test_01_public_api_exports_completeness(self) -> None:
+        """Verify all Member 2 public symbols are correctly exported."""
+        import agents
+
+        expected_symbols = [
+            "AgentRequest",
+            "SearchRequest",
+            "AgentResponse",
+            "AgentCitation",
+            "AgentState",
+            "SearchResult",
+            "SearchAgent",
+            "AgentError",
+            "AgentValidationError",
+            "AgentRoutingError",
+            "AgentExecutionError",
+        ]
+        for symbol in expected_symbols:
+            assert hasattr(agents, symbol), f"Public symbol {symbol} missing in agents package."
+            assert getattr(agents, symbol) is not None
+
+    # ------------------------------------------------------------------
+    # Audit 2 — Member 1 integration verification
+    # ------------------------------------------------------------------
+
+    def test_02_member1_integration_verification(self) -> None:
+        """SearchAgent reuses Member 1 retrieve_context without duplication."""
+        import agents.search_agent as sa
+        from ingestion.retrieval_service import retrieve_context
+
+        assert sa.retrieve_context is retrieve_context
+
+    # ------------------------------------------------------------------
+    # Audit 3 — Full successful query contract
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_03_full_successful_query_contract(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Full pipeline generates valid SearchResult with all expected contract properties."""
+        results = [
+            _make_valid_result(chunk_id="chk-d31-1", score=0.92, content_type="text"),
+            _make_valid_result(chunk_id="chk-d31-2", score=0.85, content_type="table"),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("OmniBrain audit query")
+
+        assert pkg.query == "OmniBrain audit query"
+        assert pkg.status == "RESULTS_FOUND"
+        assert pkg.has_results is True
+        assert pkg.total_results == 2
+        assert pkg.text_count == 1
+        assert pkg.table_count == 1
+        assert pkg.image_count == 0
+        assert len(pkg.citations) == 2
+        assert "[Source 1]" in pkg.context
+        assert "[Source 2]" in pkg.context
+
+    # ------------------------------------------------------------------
+    # Audit 4 — Empty result contract
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_04_empty_result_contract(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Empty retrieval returns honest NO_RESULTS without fabricated data."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("No evidence exists")
+
+        assert pkg.query == "No evidence exists"
+        assert pkg.status == "NO_RESULTS"
+        assert pkg.has_results is False
+        assert pkg.total_results == 0
+        assert pkg.citations == []
+        assert pkg.context == ""
+        assert pkg.text_results == []
+        assert pkg.table_results == []
+        assert pkg.image_results == []
+        assert pkg.unique_document_count == 0
+
+    # ------------------------------------------------------------------
+    # Audit 5 — Multimodal contract preservation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_05_multimodal_contract_preservation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Text, table, and image results preserve exact lineage and modality."""
+        results = [
+            _make_valid_result(chunk_id="c-txt", content_type="text", score=0.9),
+            _make_valid_result(chunk_id="c-tbl", content_type="table", score=0.8),
+            _make_valid_result(chunk_id="c-img", content_type="image", score=0.7),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Multimodal audit")
+
+        assert [c.content_type for c in pkg.citations] == ["text", "table", "image"]
+        assert len(pkg.text_results) == 1
+        assert len(pkg.table_results) == 1
+        assert len(pkg.image_results) == 1
+        assert pkg.text_results[0].chunk_id == "c-txt"
+        assert pkg.table_results[0].chunk_id == "c-tbl"
+        assert pkg.image_results[0].chunk_id == "c-img"
+
+    # ------------------------------------------------------------------
+    # Audit 6 — Supervisor-ready contract completeness
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_06_supervisor_ready_contract_completeness(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """SearchResult dictionary and properties expose all fields needed by Supervisor."""
+        cit_res = _make_valid_result(chunk_id="chk-sup", score=0.91, document_id="doc-audit-1")
+        mock_retrieve_context.return_value = _make_retrieval_result([cit_res])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Supervisor readiness test")
+
+        d = pkg.to_dict()
+        required_keys = [
+            "query",
+            "status",
+            "citations",
+            "context",
+            "total_results",
+            "evidence_count",
+            "has_results",
+            "text_count",
+            "table_count",
+            "image_count",
+            "unique_document_count",
+            "unique_documents",
+            "metadata",
+        ]
+        for key in required_keys:
+            assert key in d, f"Key {key} missing in SearchResult.to_dict()."
+
+    # ------------------------------------------------------------------
+    # Audit 7 — Deterministic execution across calls
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_07_deterministic_execution_across_calls(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Same input query and results produce identical SearchResult."""
+        results = [_make_valid_result(chunk_id="chk-det", score=0.88)]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg_a = agent.search_and_package("Deterministic audit query")
+        pkg_b = agent.search_and_package("Deterministic audit query")
+
+        assert pkg_a.to_dict() == pkg_b.to_dict()
+
+    # ------------------------------------------------------------------
+    # Audit 8 — Exactly-once embedding and retrieval invocation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_08_exactly_once_invocation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Search execution calls embed and retrieve_context exactly once."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MagicMock()
+        provider.embed.return_value = [0.1, 0.2, 0.3, 0.4]
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search_and_package("Once audit")
+
+        assert provider.embed.call_count == 1
+        assert mock_retrieve_context.call_count == 1
+
+
+
 
 
