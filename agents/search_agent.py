@@ -185,6 +185,64 @@ class SearchAgent:
                 f"got {item.chunk_index!r}."
             )
 
+        # Day 26: content quality gate — evidence with no readable content cannot be cited
+        if not isinstance(item.content, str) or not item.content.strip():
+            raise AgentExecutionError(
+                f"Result at index {idx}: content is empty or missing — "
+                "evidence quality is insufficient for citation."
+            )
+
+    @staticmethod
+    def _apply_member2_result_policy(
+        results: list[VectorSearchResult],
+        max_results: int,
+    ) -> list[VectorSearchResult]:
+        """Apply Member 2-level evidence policy after Member 1 retrieval returns.
+
+        Provides a defensive boundary guarantee over the results returned by
+        Member 1's retrieve_context without repeating the Qdrant search or
+        duplicating any Member 1 processing logic.  Three operations:
+
+        1. **Deduplication** — for any chunk_id that appears more than once,
+           retain only the highest-scored entry.  When scores are equal the
+           first occurrence in the sorted order wins.
+        2. **Score ordering** — results are sorted strictly by score descending
+           with deterministic tie-breaking on chunk_index (ascending) then
+           chunk_id (lexicographic ascending).
+        3. **Result cap** — the final list is sliced to max_results so the
+           citation set never exceeds the configured limit.
+
+        Member 1 already performs equivalent operations during retrieval.  This
+        layer is the Member 2 contract enforcement point — it does not call
+        retrieve_context again, does not perform vector similarity, and does
+        not modify scores.
+
+        Args:
+            results: Type-checked list[VectorSearchResult] from Member 1.
+            max_results: Maximum citations to return (positive integer).
+
+        Returns:
+            Deduplicated, score-ranked, capped list[VectorSearchResult].
+        """
+        if not results:
+            return []
+
+        # 1. Deduplicate by chunk_id: keep highest-scored entry per unique chunk.
+        #    Items with invalid/empty chunk_ids are grouped under the same key;
+        #    integrity validation (_validate_result_integrity) will reject them.
+        seen: dict[str, VectorSearchResult] = {}
+        for item in results:
+            chunk_key = item.chunk_id
+            if chunk_key not in seen or item.score > seen[chunk_key].score:
+                seen[chunk_key] = item
+
+        # 2. Sort descending by score; deterministic tie-breaking ensures stable output.
+        deduped = list(seen.values())
+        deduped.sort(key=lambda r: (-r.score, r.chunk_index, r.chunk_id))
+
+        # 3. Enforce Member 2-side result cap (no additional retrieval calls).
+        return deduped[:max_results]
+
     def _extract_and_validate_request(
         self,
         request: str | AgentRequest | SearchRequest,
@@ -355,8 +413,10 @@ class SearchAgent:
             2. Generates dense query vector using Member 1 EmbeddingProvider.
             3. Executes similarity search and context building via Member 1 retrieve_context.
             4. Validates retrieval service response structure for type safety.
-            5. Converts real VectorSearchResult objects into AgentCitation objects preserving lineage.
-            6. Returns typed AgentResponse with normalized evidence and metadata without LLM answers.
+            5. Applies Member 2 evidence policy: dedup by chunk_id, descending sort, result cap.
+            6. Validates per-item evidence field integrity (lineage, score, content).
+            7. Converts validated VectorSearchResult objects into AgentCitation objects.
+            8. Returns typed AgentResponse with normalized evidence and metadata.
 
         Args:
             request: Raw string query, AgentRequest instance, or SearchRequest instance.
@@ -431,15 +491,22 @@ class SearchAgent:
                     f"Result item at index {idx} is not a VectorSearchResult: got {type(item).__name__}."
                 )
 
-        # 4b. Per-item evidence field integrity validation (Day 24)
-        #     Validates lineage fields, score quality, and modality before citation promotion.
-        #     Any malformed item immediately aborts the response — no silent repair or skipping.
+        # 4b. Per-item evidence field integrity validation (Days 24/26)
+        #     Validates lineage fields, score quality, content, and modality.
+        #     Any malformed item immediately aborts the response — no silent repair.
         for idx, item in enumerate(retrieval_result.results):
             self._validate_result_integrity(item, idx)
 
-        # 5. Convert VectorSearchResult objects to AgentCitation objects preserving lineage
+        # 5. Member 2 evidence policy (Day 26)
+        #    Deduplicates by chunk_id (highest score wins), sorts descending, caps at max_results.
+        #    Does not repeat Qdrant search or any Member 1 computation.
+        filtered_results = self._apply_member2_result_policy(
+            retrieval_result.results, effective_max_results
+        )
+
+        # 6. Convert filtered VectorSearchResult objects to AgentCitation objects
         citations: list[AgentCitation] = []
-        for item in retrieval_result.results:
+        for item in filtered_results:
             try:
                 citations.append(AgentCitation.from_search_result(item))
             except Exception as err:
@@ -447,19 +514,23 @@ class SearchAgent:
                     f"Failed to convert retrieval result to citation: {err}"
                 ) from err
 
-        # 6. Build normalized response metadata
+        # 8. Build normalized response metadata from the filtered result set
+        final_text = sum(1 for r in filtered_results if r.content_type == "text")
+        final_table = sum(1 for r in filtered_results if r.content_type == "table")
+        final_image = sum(1 for r in filtered_results if r.content_type == "image")
+
         response_metadata: dict[str, Any] = {
             **request_metadata,
             "query": query_text,
             "context": retrieval_result.context,
-            "total_results": retrieval_result.total_results,
-            "text_results": retrieval_result.text_results,
-            "table_results": retrieval_result.table_results,
-            "image_results": retrieval_result.image_results,
+            "total_results": len(filtered_results),
+            "text_results": final_text,
+            "table_results": final_table,
+            "image_results": final_image,
             "results_by_modality": {
-                "text": retrieval_result.text_results,
-                "table": retrieval_result.table_results,
-                "image": retrieval_result.image_results,
+                "text": final_text,
+                "table": final_table,
+                "image": final_image,
             },
             "query_vector_dimension": retrieval_result.query_vector_dimension,
             "collection_name": effective_collection,
@@ -468,7 +539,7 @@ class SearchAgent:
             "max_results": effective_max_results,
         }
 
-        # 7. Construct AgentResponse (Retrieval agent does NOT generate LLM answers)
+        # 9. Construct AgentResponse (Retrieval agent does NOT generate LLM answers)
         return AgentResponse(
             answer="",
             agent_name=self.agent_name,
