@@ -4522,3 +4522,750 @@ class TestDay28SearchResultPackagingAndDownstreamContract:
         assert restored.total_results == orig.total_results
 
 
+# ---------------------------------------------------------------------------
+# Day 29 — Complete Query Execution Orchestration & Supervisor-Ready Contract
+# ---------------------------------------------------------------------------
+
+
+class TestDay29QueryExecutionOrchestrationAndSupervisorContract:
+    """Day 29 — Comprehensive end-to-end query execution orchestration and contract tests.
+
+    Covers all 38+ required scenarios: full orchestration pipeline (validation ->
+    embedding -> retrieval -> filter/rank -> citation/context -> packaging),
+    single-invocation guarantees, call ordering, error isolation, multimodal preservation,
+    and Member 1 component reuse.
+    """
+
+    # ------------------------------------------------------------------
+    # Scenario 1 — Valid query end-to-end
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_01_valid_query_end_to_end(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Valid query runs through full pipeline to produce a valid AgentResponse."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(chunk_id="chk-d29-01", score=0.91)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("What is dense vector retrieval?")
+
+        assert response.status == "success"
+        assert response.total_citations == 1
+        assert response.citations[0].chunk_id == "chk-d29-01"
+        assert response.metadata["search_status"] == "RESULTS_FOUND"
+        assert response.metadata["has_results"] is True
+
+    # ------------------------------------------------------------------
+    # Scenario 2 — Whitespace query validation
+    # ------------------------------------------------------------------
+
+    def test_02_whitespace_query_validation(self, mock_store: MagicMock) -> None:
+        """Whitespace query is rejected before embedding generation."""
+        provider = MagicMock()
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentValidationError):
+            agent.search("   \t\n   ")
+
+        provider.embed.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 3 — Empty query validation
+    # ------------------------------------------------------------------
+
+    def test_03_empty_query_validation(self, mock_store: MagicMock) -> None:
+        """Empty query is rejected before embedding generation."""
+        provider = MagicMock()
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentValidationError):
+            agent.search("")
+
+        provider.embed.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 4 — None query validation
+    # ------------------------------------------------------------------
+
+    def test_04_none_query_validation(self, mock_store: MagicMock) -> None:
+        """None query is rejected before embedding generation."""
+        provider = MagicMock()
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentValidationError):
+            agent.search(None)  # type: ignore[arg-type]
+
+        provider.embed.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 5 — Invalid query type validation
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("invalid_q", [12345, 3.1415, ["query"], {"q": "text"}, True])
+    def test_05_invalid_query_type_validation(self, mock_store: MagicMock, invalid_q: Any) -> None:
+        """Non-string/non-Request query is rejected before embedding."""
+        provider = MagicMock()
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentValidationError):
+            agent.search(invalid_q)
+
+        provider.embed.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 6 — Successful embedding generation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_06_successful_embedding_generation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Generated embedding vector is passed faithfully to retrieve_context."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4, return_vector=[0.11, 0.22, 0.33, 0.44])
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search("Vector generation query")
+
+        mock_retrieve_context.assert_called_once()
+        assert mock_retrieve_context.call_args.kwargs["query_vector"] == [0.11, 0.22, 0.33, 0.44]
+
+    # ------------------------------------------------------------------
+    # Scenario 7 — Embedding called exactly once
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_07_embedding_called_exactly_once(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """One search call results in exactly one provider.embed invocation."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MagicMock()
+        provider.embed.return_value = [0.1, 0.2, 0.3, 0.4]
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search("Single embed call")
+
+        assert provider.embed.call_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 8 — Retrieval called exactly once
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_08_retrieval_called_exactly_once(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """One search call invokes Member 1 retrieve_context exactly once."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search("Single retrieve call")
+
+        assert mock_retrieve_context.call_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 9 — Successful retrieval flow
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_09_successful_retrieval_flow(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Results returned from retrieve_context flow into citations and metadata."""
+        result = _make_valid_result(chunk_id="chk-success", score=0.89)
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Successful flow")
+
+        assert response.total_citations == 1
+        assert response.citations[0].chunk_id == "chk-success"
+
+    # ------------------------------------------------------------------
+    # Scenario 10 — Zero retrieval results flow
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_10_zero_retrieval_results_flow(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Zero retrieval results cleanly produce empty citations and NO_RESULTS status."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Zero results query")
+
+        assert response.total_citations == 0
+        assert response.metadata["search_status"] == "NO_RESULTS"
+        assert response.metadata["has_results"] is False
+        assert response.metadata["context"] == ""
+
+    # ------------------------------------------------------------------
+    # Scenario 11 — Multiple retrieval results orchestration
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_11_multiple_retrieval_results_orchestration(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Multiple retrieved items are properly processed through the full pipeline."""
+        results = [
+            _make_valid_result(chunk_id="c1", score=0.95),
+            _make_valid_result(chunk_id="c2", score=0.85),
+            _make_valid_result(chunk_id="c3", score=0.75),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Multi results query")
+
+        assert response.total_citations == 3
+        assert [c.chunk_id for c in response.citations] == ["c1", "c2", "c3"]
+
+    # ------------------------------------------------------------------
+    # Scenario 12 — Filtering reuse and deduplication
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_12_filtering_reuse_and_deduplication(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Duplicate results with same chunk_id are deduplicated keeping highest score."""
+        results = [
+            _make_valid_result(chunk_id="dup-chunk", score=0.60),
+            _make_valid_result(chunk_id="dup-chunk", score=0.92),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Deduplication orchestration")
+
+        assert response.total_citations == 1
+        assert response.citations[0].score == 0.92
+
+    # ------------------------------------------------------------------
+    # Scenario 13 — Ranking preservation descending
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_13_ranking_preservation_descending(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Results are ordered strictly descending by score."""
+        results = [
+            _make_valid_result(chunk_id="c-low", score=0.40),
+            _make_valid_result(chunk_id="c-high", score=0.98),
+            _make_valid_result(chunk_id="c-mid", score=0.75),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Ranking check")
+
+        assert [c.chunk_id for c in response.citations] == ["c-high", "c-mid", "c-low"]
+
+    # ------------------------------------------------------------------
+    # Scenario 14 — Citation preservation all provenance fields
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_14_citation_preservation_all_provenance_fields(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Every citation preserves document_id, filename, page_number, chunk_id, content_type, score, metadata."""
+        result = VectorSearchResult(
+            chunk_id="chk-full-provenance",
+            score=0.933,
+            document_id="doc-prov-100",
+            filename="financial_overview.pdf",
+            page_number=8,
+            chunk_index=2,
+            content_type="table",
+            content="Revenue: $500K",
+            metadata={"auditor": "PwC"},
+        )
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Provenance check")
+
+        cit = response.citations[0]
+        assert cit.chunk_id == "chk-full-provenance"
+        assert cit.document_id == "doc-prov-100"
+        assert cit.filename == "financial_overview.pdf"
+        assert cit.page_number == 8
+        assert cit.content_type == "table"
+        assert cit.score == 0.933
+        assert cit.metadata == {"auditor": "PwC"}
+
+    # ------------------------------------------------------------------
+    # Scenario 15 — Context preservation source blocks
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_15_context_preservation_source_blocks(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Context builds deterministic [Source 1], [Source 2] blocks in score order."""
+        results = [
+            _make_valid_result(chunk_id="c1", filename="a.pdf", score=0.90, content="Content A"),
+            _make_valid_result(chunk_id="c2", filename="b.pdf", score=0.80, content="Content B"),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Context blocks check")
+
+        ctx = response.metadata["context"]
+        assert "[Source 1]" in ctx
+        assert "File: a.pdf" in ctx
+        assert "[Source 2]" in ctx
+        assert "File: b.pdf" in ctx
+
+    # ------------------------------------------------------------------
+    # Scenario 16 — Result packaging via search_and_package
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_16_result_packaging_via_search_and_package(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """search_and_package returns a validated SearchResult instance."""
+        result = _make_valid_result(chunk_id="chk-pkg", score=0.88)
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Packaging test")
+
+        assert isinstance(pkg, SearchResult)
+        assert pkg.query == "Packaging test"
+        assert pkg.status == "RESULTS_FOUND"
+        assert pkg.total_results == 1
+        assert pkg.has_results is True
+
+    # ------------------------------------------------------------------
+    # Scenario 17 — RESULTS_FOUND status on success
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_17_results_found_status_on_success(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Non-empty search results produce RESULTS_FOUND status in metadata and package."""
+        mock_retrieve_context.return_value = _make_retrieval_result([_make_valid_result()])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Status found check")
+        assert pkg.status == "RESULTS_FOUND"
+
+    # ------------------------------------------------------------------
+    # Scenario 18 — NO_RESULTS status on empty
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_18_no_results_status_on_empty(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Empty search results produce NO_RESULTS status."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Status no results check")
+        assert pkg.status == "NO_RESULTS"
+
+    # ------------------------------------------------------------------
+    # Scenario 19 — Text result orchestration
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_19_text_result_orchestration(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Text modality evidence is accurately tracked in text_results."""
+        result = _make_valid_result(chunk_id="txt-1", content_type="text")
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Text orchestration")
+        assert pkg.text_count == 1
+        assert len(pkg.text_results) == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 20 — Table result orchestration
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_20_table_result_orchestration(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Table modality evidence is accurately tracked in table_results."""
+        result = _make_valid_result(chunk_id="tbl-1", content_type="table")
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Table orchestration")
+        assert pkg.table_count == 1
+        assert len(pkg.table_results) == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 21 — Image result orchestration
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_21_image_result_orchestration(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Image modality evidence is accurately tracked in image_results."""
+        result = _make_valid_result(chunk_id="img-1", content_type="image")
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Image orchestration")
+        assert pkg.image_count == 1
+        assert len(pkg.image_results) == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 22 — Multimodal result orchestration
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_22_multimodal_result_orchestration(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Multimodal evidence counts and lists correctly aggregate."""
+        results = [
+            _make_valid_result(chunk_id="t1", content_type="text"),
+            _make_valid_result(chunk_id="t2", content_type="text"),
+            _make_valid_result(chunk_id="tb1", content_type="table"),
+            _make_valid_result(chunk_id="im1", content_type="image"),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Multimodal orchestration")
+        assert pkg.total_results == 4
+        assert pkg.text_count == 2
+        assert pkg.table_count == 1
+        assert pkg.image_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 23 — Unique document count orchestration
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_23_unique_document_count_orchestration(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """unique_document_count matches number of distinct document IDs."""
+        results = [
+            _make_valid_result(chunk_id="c1", document_id="doc-A"),
+            _make_valid_result(chunk_id="c2", document_id="doc-A"),
+            _make_valid_result(chunk_id="c3", document_id="doc-B"),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Unique doc count orchestration")
+        assert pkg.unique_document_count == 2
+        assert pkg.unique_documents == ["doc-A", "doc-B"]
+
+    # ------------------------------------------------------------------
+    # Scenario 24 — Embedding failure prevents retrieval
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_24_embedding_failure_prevents_retrieval(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """If embedding provider raises an exception, retrieve_context is NEVER called."""
+        provider = MagicMock()
+        provider.embed.side_effect = RuntimeError("Embedding provider unreachable")
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="Failed to generate query embedding"):
+            agent.search("Embedding failure query")
+
+        mock_retrieve_context.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 25 — Retrieval failure raises execution error
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_25_retrieval_failure_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """If retrieve_context raises an exception, search raises AgentExecutionError."""
+        mock_retrieve_context.side_effect = RuntimeError("Qdrant cluster unavailable")
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="Retrieval execution failed"):
+            agent.search("Retrieval failure query")
+
+    # ------------------------------------------------------------------
+    # Scenario 26 — Malformed retrieval result aborts search
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_26_malformed_retrieval_result_aborts_search(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Item with missing content_type immediately aborts search with AgentExecutionError."""
+        bad_item = _make_valid_result(content_type="")
+        mock_retrieve_context.return_value = _make_retrieval_result([bad_item])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="content_type is missing or empty"):
+            agent.search("Malformed item query")
+
+    # ------------------------------------------------------------------
+    # Scenario 27 — Citation conversion failure raises execution error
+    # ------------------------------------------------------------------
+
+    def test_27_citation_failure_raises_validation_error(self) -> None:
+        """Attempting to construct citation from invalid object raises AgentValidationError."""
+        with pytest.raises(AgentValidationError):
+            AgentCitation.from_search_result(object())
+
+    # ------------------------------------------------------------------
+    # Scenario 28 — Packaging failure on corrupt response
+    # ------------------------------------------------------------------
+
+    def test_28_packaging_failure_on_corrupt_response(self) -> None:
+        """SearchResult.from_response on non-AgentResponse raises AgentValidationError."""
+        with pytest.raises(AgentValidationError, match="Expected AgentResponse instance"):
+            SearchResult.from_response("not_a_response")  # type: ignore[arg-type]
+
+    # ------------------------------------------------------------------
+    # Scenario 29 — No fake citations produced
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_29_no_fake_citations_produced(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Zero retrieval results produces exactly 0 citations."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("No fake citations")
+        assert len(pkg.citations) == 0
+
+    # ------------------------------------------------------------------
+    # Scenario 30 — No fake vectors generated
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_30_no_fake_vectors_generated(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Vector passed to retrieval is exactly the vector returned by the provider."""
+        expected_vec = [0.123, 0.456, 0.789, 0.999]
+        provider = MockEmbeddingProvider(dimension=4, return_vector=expected_vec)
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search("Real vector check")
+        assert mock_retrieve_context.call_args.kwargs["query_vector"] == expected_vec
+
+    # ------------------------------------------------------------------
+    # Scenario 31 — No duplicate embedding invocation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_31_no_duplicate_embedding_invocation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """search_and_package executes embedding exactly once."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MagicMock()
+        provider.embed.return_value = [0.1, 0.2, 0.3, 0.4]
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search_and_package("Single embed check")
+        assert provider.embed.call_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 32 — No duplicate retrieval invocation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_32_no_duplicate_retrieval_invocation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """search_and_package executes retrieval exactly once."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search_and_package("Single retrieval check")
+        assert mock_retrieve_context.call_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 33 — Member 1 API reuse verification
+    # ------------------------------------------------------------------
+
+    def test_33_member1_api_reuse_verification(self) -> None:
+        """SearchAgent reuses retrieve_context from ingestion.retrieval_service."""
+        import agents.search_agent as sa
+        from ingestion.retrieval_service import retrieve_context
+
+        assert sa.retrieve_context is retrieve_context
+
+    # ------------------------------------------------------------------
+    # Scenario 34 — Day 26 filtering reuse verification
+    # ------------------------------------------------------------------
+
+    def test_34_day26_filtering_reuse_verification(self) -> None:
+        """SearchAgent retains _apply_member2_result_policy static method."""
+        assert hasattr(SearchAgent, "_apply_member2_result_policy")
+        assert callable(SearchAgent._apply_member2_result_policy)
+
+    # ------------------------------------------------------------------
+    # Scenario 35 — Day 27 context reuse verification
+    # ------------------------------------------------------------------
+
+    def test_35_day27_context_reuse_verification(self) -> None:
+        """SearchAgent retains _build_evidence_context static method."""
+        assert hasattr(SearchAgent, "_build_evidence_context")
+        assert callable(SearchAgent._build_evidence_context)
+
+    # ------------------------------------------------------------------
+    # Scenario 36 — Day 28 packaging reuse verification
+    # ------------------------------------------------------------------
+
+    def test_36_day28_packaging_reuse_verification(self) -> None:
+        """SearchAgent retains package_result and search_and_package methods."""
+        assert hasattr(SearchAgent, "package_result")
+        assert hasattr(SearchAgent, "search_and_package")
+
+    # ------------------------------------------------------------------
+    # Scenario 37 — Deterministic result across calls
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_37_deterministic_result_across_calls(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Repeated search_and_package calls on identical data return equivalent SearchResult."""
+        results = [
+            _make_valid_result(chunk_id="c1", score=0.9),
+            _make_valid_result(chunk_id="c2", score=0.8),
+        ]
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        pkg1 = agent.search_and_package("deterministic query")
+
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        pkg2 = agent.search_and_package("deterministic query")
+
+        assert pkg1.to_dict() == pkg2.to_dict()
+
+    # ------------------------------------------------------------------
+    # Scenario 38 — Call order verification step by step
+    # ------------------------------------------------------------------
+
+    def test_38_call_order_verification(self, mock_store: MagicMock) -> None:
+        """Verify strict step order: validate -> embed -> retrieve -> filter -> cite -> package."""
+        execution_order: list[str] = []
+
+        class TrackingProvider:
+            def embed(self, text: str) -> list[float]:
+                execution_order.append("embed")
+                return [0.1, 0.2, 0.3, 0.4]
+
+        with patch("agents.search_agent.retrieve_context") as mock_ret:
+            def tracking_retrieve(*args: Any, **kwargs: Any) -> RetrievalServiceResult:
+                execution_order.append("retrieve")
+                return _make_retrieval_result([_make_valid_result()])
+
+            mock_ret.side_effect = tracking_retrieve
+
+            agent = SearchAgent(embedding_provider=TrackingProvider(), store=mock_store)  # type: ignore[arg-type]
+            pkg = agent.search_and_package("Order tracking query")
+
+            assert execution_order == ["embed", "retrieve"]
+            assert pkg.total_results == 1
+
+
+
