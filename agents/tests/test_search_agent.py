@@ -873,3 +873,385 @@ class TestSearchAgentProductionHardening:
         assert response.citations[0].content_type == "text"
         assert response.citations[1].content_type == "table"
         assert response.citations[2].content_type == "image"
+
+
+# ---------------------------------------------------------------------------
+# Day 24 — Evidence Quality & Citation Integrity
+# ---------------------------------------------------------------------------
+
+
+def _make_valid_result(**overrides: Any) -> VectorSearchResult:
+    """Return a valid VectorSearchResult with any field replaced via overrides."""
+    defaults: dict[str, Any] = dict(
+        chunk_id="chk-valid-001",
+        score=0.75,
+        document_id="doc-valid-001",
+        filename="evidence.pdf",
+        page_number=1,
+        chunk_index=0,
+        content_type="text",
+        content="Valid evidence content.",
+        metadata={"source": "unit-test"},
+    )
+    defaults.update(overrides)
+    return VectorSearchResult(**defaults)
+
+
+def _make_retrieval_result(results: list[VectorSearchResult]) -> RetrievalServiceResult:
+    """Wrap a list of VectorSearchResult into a RetrievalServiceResult."""
+    return RetrievalServiceResult(
+        query_vector_dimension=4,
+        results=results,
+        context="[Source 1] Valid evidence content.",
+    )
+
+
+class TestEvidenceQualityAndCitationIntegrity:
+    """Day 24 — Boundary-level evidence integrity and citation fidelity tests.
+
+    Verifies that SearchAgent._validate_result_integrity rejects any
+    VectorSearchResult with malformed lineage fields before citation conversion
+    and that valid results produce citations with exact, unmodified lineage.
+    """
+
+    # ------------------------------------------------------------------
+    # 1. Rejection: empty / whitespace chunk_id
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("bad_chunk_id", ["", "   ", "\t", "\n"])
+    @patch("agents.search_agent.retrieve_context")
+    def test_empty_chunk_id_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+        bad_chunk_id: str,
+    ) -> None:
+        """Verify that a VectorSearchResult with an empty chunk_id is rejected."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(chunk_id=bad_chunk_id)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="chunk_id is missing or empty"):
+            agent.search("Test evidence integrity")
+
+    # ------------------------------------------------------------------
+    # 2. Rejection: empty / whitespace document_id
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("bad_doc_id", ["", "   ", "\t"])
+    @patch("agents.search_agent.retrieve_context")
+    def test_empty_document_id_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+        bad_doc_id: str,
+    ) -> None:
+        """Verify that a VectorSearchResult with an empty document_id is rejected."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(document_id=bad_doc_id)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="document_id is missing or empty"):
+            agent.search("Test document lineage")
+
+    # ------------------------------------------------------------------
+    # 3. Rejection: empty / whitespace filename
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("bad_filename", ["", "   ", "\t"])
+    @patch("agents.search_agent.retrieve_context")
+    def test_empty_filename_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+        bad_filename: str,
+    ) -> None:
+        """Verify that a VectorSearchResult with an empty filename is rejected."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(filename=bad_filename)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="filename is missing or empty"):
+            agent.search("Test filename attribution")
+
+    # ------------------------------------------------------------------
+    # 4. Rejection: non-finite score (NaN)
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_nan_score_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify that a VectorSearchResult with a NaN score is rejected."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(score=float("nan"))]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="score is not a finite numeric value"):
+            agent.search("NaN score query")
+
+    # ------------------------------------------------------------------
+    # 5. Rejection: non-finite score (Inf)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("bad_score", [float("inf"), float("-inf")])
+    @patch("agents.search_agent.retrieve_context")
+    def test_infinite_score_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+        bad_score: float,
+    ) -> None:
+        """Verify that a VectorSearchResult with an infinite score is rejected."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(score=bad_score)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="score is not a finite numeric value"):
+            agent.search("Infinite score query")
+
+    # ------------------------------------------------------------------
+    # 6. Rejection: empty / whitespace content_type
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("bad_ct", ["", "   ", "\t"])
+    @patch("agents.search_agent.retrieve_context")
+    def test_empty_content_type_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+        bad_ct: str,
+    ) -> None:
+        """Verify that a VectorSearchResult with an empty content_type is rejected."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(content_type=bad_ct)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="content_type is missing or empty"):
+            agent.search("Content type routing query")
+
+    # ------------------------------------------------------------------
+    # 7. Rejection: negative chunk_index
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("bad_idx", [-1, -100])
+    @patch("agents.search_agent.retrieve_context")
+    def test_negative_chunk_index_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+        bad_idx: int,
+    ) -> None:
+        """Verify that a VectorSearchResult with a negative chunk_index is rejected."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(chunk_index=bad_idx)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="chunk_index must be a non-negative integer"):
+            agent.search("Chunk index query")
+
+    # ------------------------------------------------------------------
+    # 8. Score boundary acceptance: -1.0 and 1.0 are valid
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("boundary_score", [-1.0, 0.0, 1.0])
+    @patch("agents.search_agent.retrieve_context")
+    def test_boundary_scores_are_accepted(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+        boundary_score: float,
+    ) -> None:
+        """Verify that boundary score values (-1.0, 0.0, 1.0) pass integrity validation."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(score=boundary_score)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Boundary score query")
+
+        assert response.status == "success"
+        assert response.total_citations == 1
+        assert response.citations[0].score == boundary_score
+
+    # ------------------------------------------------------------------
+    # 9. Score exact preservation — no rounding or modification
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_score_is_exactly_preserved_from_member1(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify the Member 1 similarity score is propagated to AgentCitation without modification."""
+        precise_score = 0.8761234567890123
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(score=precise_score)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Score preservation query")
+
+        assert response.citations[0].score == precise_score
+
+    # ------------------------------------------------------------------
+    # 10. Ranking order preservation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_ranking_order_is_preserved_in_citations(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify citations are produced in exact Member 1 ranking order (highest score first)."""
+        results = [
+            _make_valid_result(chunk_id="chk-rank-1", score=0.95, document_id="doc-A", filename="a.pdf"),
+            _make_valid_result(chunk_id="chk-rank-2", score=0.87, document_id="doc-B", filename="b.pdf"),
+            _make_valid_result(chunk_id="chk-rank-3", score=0.72, document_id="doc-C", filename="c.pdf"),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Ranking order query")
+
+        assert response.total_citations == 3
+        assert response.citations[0].chunk_id == "chk-rank-1"
+        assert response.citations[0].score == 0.95
+        assert response.citations[1].chunk_id == "chk-rank-2"
+        assert response.citations[1].score == 0.87
+        assert response.citations[2].chunk_id == "chk-rank-3"
+        assert response.citations[2].score == 0.72
+
+    # ------------------------------------------------------------------
+    # 11. Exact lineage propagation to AgentCitation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_exact_lineage_propagated_to_citation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify all VectorSearchResult lineage fields are faithfully copied to AgentCitation."""
+        result = _make_valid_result(
+            chunk_id="chk-lineage-99",
+            document_id="doc-lineage-42",
+            filename="annual_report_2024.pdf",
+            page_number=17,
+            content_type="table",
+            score=0.931,
+            metadata={"section": "financial", "rows": 5},
+        )
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Lineage propagation query")
+
+        assert response.total_citations == 1
+        citation = response.citations[0]
+        assert citation.chunk_id == "chk-lineage-99"
+        assert citation.document_id == "doc-lineage-42"
+        assert citation.filename == "annual_report_2024.pdf"
+        assert citation.page_number == 17
+        assert citation.content_type == "table"
+        assert citation.score == 0.931
+        assert citation.metadata["section"] == "financial"
+        assert citation.metadata["rows"] == 5
+
+    # ------------------------------------------------------------------
+    # 12. Malformed item at non-zero index aborts entire response
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_malformed_item_at_index_1_aborts_response(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify a malformed result at index 1 aborts the whole response (no partial citations)."""
+        results = [
+            _make_valid_result(chunk_id="chk-good", score=0.9),
+            _make_valid_result(chunk_id="chk-bad", score=float("nan")),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="score is not a finite numeric value"):
+            agent.search("Partial abort query")
+
+    # ------------------------------------------------------------------
+    # 13. Error message includes the 0-based index of the failing result
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_error_message_includes_result_index(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify the integrity error message identifies which result index failed."""
+        results = [
+            _make_valid_result(chunk_id="chk-ok-0"),
+            _make_valid_result(chunk_id="chk-ok-1"),
+            _make_valid_result(chunk_id="", score=0.8),  # index 2 fails
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="Result at index 2"):
+            agent.search("Index identification query")
+
+    # ------------------------------------------------------------------
+    # 14. _validate_result_integrity is publicly accessible as a static method
+    # ------------------------------------------------------------------
+
+    def test_validate_result_integrity_is_static_method(self) -> None:
+        """Verify _validate_result_integrity can be invoked as a standalone static method."""
+        valid = _make_valid_result()
+        # Must not raise for a fully valid item
+        SearchAgent._validate_result_integrity(valid, 0)
+
+    # ------------------------------------------------------------------
+    # 15. chunk_index=0 is accepted (zero is valid)
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_chunk_index_zero_is_accepted(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify chunk_index=0 passes integrity validation (zero is the minimum valid value)."""
+        mock_retrieve_context.return_value = _make_retrieval_result(
+            [_make_valid_result(chunk_index=0)]
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Zero chunk index query")
+        assert response.status == "success"
+        assert response.total_citations == 1

@@ -101,6 +101,73 @@ class SearchAgent:
                 f"max_results must be a positive integer > 0, got {max_results!r}."
             )
 
+    @staticmethod
+    def _validate_result_integrity(item: VectorSearchResult, idx: int) -> None:
+        """Validate field integrity of a single VectorSearchResult before citation conversion.
+
+        Enforces that each retrieved evidence item carries complete, trustworthy lineage
+        before it is promoted to an AgentCitation.  Raises immediately on the first
+        violation — items are never silently skipped, repaired, or fabricated.
+
+        Checks performed:
+            - chunk_id: non-empty string (unique chunk provenance key).
+            - document_id: non-empty string (parent document lineage key).
+            - filename: non-empty string (source file identifier).
+            - score: finite numeric float (as-returned by Member 1 retrieval, not modified).
+            - content_type: non-empty string (modality tag required for supervisor routing).
+            - chunk_index: non-negative integer (sequential position within document).
+
+        Args:
+            item: VectorSearchResult to validate.
+            idx: 0-based position in the results list, used in error messages.
+
+        Raises:
+            AgentExecutionError: If any field fails integrity validation.
+        """
+        if not isinstance(item.chunk_id, str) or not item.chunk_id.strip():
+            raise AgentExecutionError(
+                f"Result at index {idx}: chunk_id is missing or empty — "
+                "citation lineage cannot be established."
+            )
+
+        if not isinstance(item.document_id, str) or not item.document_id.strip():
+            raise AgentExecutionError(
+                f"Result at index {idx}: document_id is missing or empty — "
+                "citation lineage cannot be established."
+            )
+
+        if not isinstance(item.filename, str) or not item.filename.strip():
+            raise AgentExecutionError(
+                f"Result at index {idx}: filename is missing or empty — "
+                "source file attribution cannot be established."
+            )
+
+        if (
+            not isinstance(item.score, (int, float))
+            or isinstance(item.score, bool)
+            or not math.isfinite(item.score)
+        ):
+            raise AgentExecutionError(
+                f"Result at index {idx}: score is not a finite numeric value "
+                f"({item.score!r}) — Member 1 relevance signal cannot be trusted."
+            )
+
+        if not isinstance(item.content_type, str) or not item.content_type.strip():
+            raise AgentExecutionError(
+                f"Result at index {idx}: content_type is missing or empty — "
+                "modality routing for the supervisor cannot be determined."
+            )
+
+        if (
+            not isinstance(item.chunk_index, int)
+            or isinstance(item.chunk_index, bool)
+            or item.chunk_index < 0
+        ):
+            raise AgentExecutionError(
+                f"Result at index {idx}: chunk_index must be a non-negative integer, "
+                f"got {item.chunk_index!r}."
+            )
+
     def _extract_and_validate_request(
         self,
         request: str | AgentRequest | SearchRequest,
@@ -331,6 +398,12 @@ class SearchAgent:
                 raise AgentExecutionError(
                     f"Result item at index {idx} is not a VectorSearchResult: got {type(item).__name__}."
                 )
+
+        # 4b. Per-item evidence field integrity validation (Day 24)
+        #     Validates lineage fields, score quality, and modality before citation promotion.
+        #     Any malformed item immediately aborts the response — no silent repair or skipping.
+        for idx, item in enumerate(retrieval_result.results):
+            self._validate_result_integrity(item, idx)
 
         # 5. Convert VectorSearchResult objects to AgentCitation objects preserving lineage
         citations: list[AgentCitation] = []
