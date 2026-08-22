@@ -243,6 +243,39 @@ class SearchAgent:
         # 3. Enforce Member 2-side result cap (no additional retrieval calls).
         return deduped[:max_results]
 
+    @staticmethod
+    def _build_evidence_context(results: list[VectorSearchResult]) -> str:
+        """Build structured, deterministic, citation-numbered context from accepted evidence items.
+
+        Assigns 1-indexed source numbers ([Source 1], [Source 2], ...) following
+        the exact descending relevance order of the filtered evidence items.
+        Preserves all multimodal content types (text, table, image) faithfully.
+        Returns an empty string if results is empty.
+
+        Args:
+            results: Ordered list of validated VectorSearchResult objects.
+
+        Returns:
+            Clean, formatted textual context string with deterministic [Source N] blocks.
+        """
+        if not results:
+            return ""
+
+        source_blocks: list[str] = []
+        for idx, res in enumerate(results, start=1):
+            page_str = str(res.page_number) if res.page_number is not None else "N/A"
+            block = (
+                f"[Source {idx}]\n"
+                f"File: {res.filename}\n"
+                f"Page: {page_str}\n"
+                f"Type: {res.content_type}\n"
+                f"Content:\n"
+                f"{res.content}"
+            )
+            source_blocks.append(block)
+
+        return "\n\n".join(source_blocks)
+
     def _extract_and_validate_request(
         self,
         request: str | AgentRequest | SearchRequest,
@@ -514,6 +547,9 @@ class SearchAgent:
                     f"Failed to convert retrieval result to citation: {err}"
                 ) from err
 
+        # 7. Build citation-aware evidence context from the filtered result set
+        evidence_context = self._build_evidence_context(filtered_results)
+
         # 8. Build normalized response metadata from the filtered result set
         final_text = sum(1 for r in filtered_results if r.content_type == "text")
         final_table = sum(1 for r in filtered_results if r.content_type == "table")
@@ -522,8 +558,10 @@ class SearchAgent:
         response_metadata: dict[str, Any] = {
             **request_metadata,
             "query": query_text,
-            "context": retrieval_result.context,
+            "context": evidence_context,
             "total_results": len(filtered_results),
+            "evidence_count": len(filtered_results),
+            "has_evidence": len(filtered_results) > 0,
             "text_results": final_text,
             "table_results": final_table,
             "image_results": final_image,
