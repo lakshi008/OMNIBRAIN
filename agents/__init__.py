@@ -17,6 +17,7 @@ from agents.models import (
     AgentResponse,
     AgentState,
 )
+from agents.search_agent import SearchAgent
 
 __all__ = [
     # Domain Models
@@ -24,6 +25,8 @@ __all__ = [
     "AgentResponse",
     "AgentCitation",
     "AgentState",
+    # Agents
+    "SearchAgent",
     # Domain Exceptions
     "AgentError",
     "AgentValidationError",
