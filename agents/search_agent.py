@@ -12,7 +12,7 @@ import math
 from typing import Any
 
 from agents.exceptions import AgentExecutionError, AgentValidationError
-from agents.models import AgentCitation, AgentRequest, AgentResponse
+from agents.models import AgentCitation, AgentRequest, AgentResponse, SearchRequest
 from ingestion.embedding_generator import EmbeddingProvider
 from ingestion.models import RetrievalServiceResult, VectorSearchResult
 from ingestion.qdrant_store import QdrantVectorStore
@@ -101,8 +101,15 @@ class SearchAgent:
                 f"max_results must be a positive integer > 0, got {max_results!r}."
             )
 
-    def _extract_and_validate_query(self, request: str | AgentRequest) -> tuple[str, dict[str, Any]]:
-        """Validate and extract query string and optional request metadata."""
+    def _extract_and_validate_request(
+        self,
+        request: str | AgentRequest | SearchRequest,
+        top_k: int | None = None,
+        min_score: float | None = None,
+        max_results: int | None = None,
+        collection_name: str | None = None,
+    ) -> tuple[str, int, float, int, str, dict[str, Any]]:
+        """Validate and extract query string, parameters, and metadata from request."""
         if request is None:
             raise AgentValidationError("Query request cannot be None.")
 
@@ -110,21 +117,97 @@ class SearchAgent:
             cleaned = request.strip()
             if not cleaned:
                 raise AgentValidationError("Query string cannot be empty or whitespace-only.")
-            return cleaned, {}
+            eff_top_k = self.top_k if top_k is None else top_k
+            eff_min_score = self.min_score if min_score is None else float(min_score)
+            eff_max_results = self.max_results if max_results is None else max_results
+            eff_coll = (
+                self.collection_name
+                if collection_name is None or not collection_name.strip()
+                else collection_name.strip()
+            )
+            return cleaned, eff_top_k, eff_min_score, eff_max_results, eff_coll, {}
+
+        if isinstance(request, SearchRequest):
+            cleaned = request.query.strip()
+            if not cleaned:
+                raise AgentValidationError("Query in SearchRequest cannot be empty or whitespace-only.")
+
+            eff_top_k = (
+                request.top_k
+                if request.top_k is not None
+                else (self.top_k if top_k is None else top_k)
+            ) if top_k is None else top_k
+
+            eff_min_score = (
+                request.min_score
+                if request.min_score is not None
+                else (self.min_score if min_score is None else float(min_score))
+            ) if min_score is None else float(min_score)
+
+            eff_max_results = (
+                request.max_results
+                if request.max_results is not None
+                else (self.max_results if max_results is None else max_results)
+            ) if max_results is None else max_results
+
+            req_coll = request.collection_name
+            if collection_name is not None and collection_name.strip():
+                eff_coll = collection_name.strip()
+            elif req_coll is not None and req_coll.strip():
+                eff_coll = req_coll.strip()
+            else:
+                eff_coll = self.collection_name
+
+            metadata = dict(request.metadata)
+            if request.session_id is not None:
+                metadata["session_id"] = request.session_id
+            if request.document_filter is not None:
+                metadata["document_filter"] = request.document_filter
+            return cleaned, eff_top_k, eff_min_score, eff_max_results, eff_coll, metadata
 
         if isinstance(request, AgentRequest):
             cleaned = request.query.strip()
             if not cleaned:
                 raise AgentValidationError("Query in AgentRequest cannot be empty or whitespace-only.")
             metadata = dict(request.metadata)
+
+            req_top_k = metadata.pop("top_k", None)
+            eff_top_k = (
+                req_top_k
+                if isinstance(req_top_k, int) and not isinstance(req_top_k, bool)
+                else (self.top_k if top_k is None else top_k)
+            ) if top_k is None else top_k
+
+            req_min_score = metadata.pop("min_score", None)
+            eff_min_score = (
+                float(req_min_score)
+                if isinstance(req_min_score, (int, float)) and not isinstance(req_min_score, bool)
+                else (self.min_score if min_score is None else float(min_score))
+            ) if min_score is None else float(min_score)
+
+            req_max_results = metadata.pop("max_results", None)
+            eff_max_results = (
+                req_max_results
+                if isinstance(req_max_results, int) and not isinstance(req_max_results, bool)
+                else (self.max_results if max_results is None else max_results)
+            ) if max_results is None else max_results
+
+            req_coll = metadata.pop("collection_name", None)
+            if collection_name is not None and collection_name.strip():
+                eff_coll = collection_name.strip()
+            elif isinstance(req_coll, str) and req_coll.strip():
+                eff_coll = req_coll.strip()
+            else:
+                eff_coll = self.collection_name
+
             if request.session_id is not None:
                 metadata["session_id"] = request.session_id
             if request.document_filter is not None:
                 metadata["document_filter"] = request.document_filter
-            return cleaned, metadata
+            return cleaned, eff_top_k, eff_min_score, eff_max_results, eff_coll, metadata
 
         raise AgentValidationError(
-            f"Expected query string or AgentRequest, got {type(request).__name__}."
+            f"Expected query string, AgentRequest, or SearchRequest, got {type(request).__name__}."
         )
 
     def _generate_query_vector(self, query: str) -> list[float]:
@@ -160,7 +243,7 @@ class SearchAgent:
 
     def search(
         self,
-        request: str | AgentRequest,
+        request: str | AgentRequest | SearchRequest,
         top_k: int | None = None,
         min_score: float | None = None,
         max_results: int | None = None,
@@ -169,14 +252,15 @@ class SearchAgent:
         """Execute structured search workflow for user query.
 
         Workflow:
-            1. Validates query request.
+            1. Validates query request and resolves search configuration.
             2. Generates dense query vector using Member 1 EmbeddingProvider.
             3. Executes similarity search and context building via Member 1 retrieve_context.
-            4. Converts real VectorSearchResult objects into AgentCitation objects preserving lineage.
-            5. Returns typed AgentResponse with evidence and metadata without LLM answers.
+            4. Validates retrieval service response structure for type safety.
+            5. Converts real VectorSearchResult objects into AgentCitation objects preserving lineage.
+            6. Returns typed AgentResponse with normalized evidence and metadata without LLM answers.
 
         Args:
-            request: Raw string query or AgentRequest instance.
+            request: Raw string query, AgentRequest instance, or SearchRequest instance.
             top_k: Optional override for initial nearest neighbors to retrieve.
             min_score: Optional override for minimum similarity score threshold.
             max_results: Optional override for maximum final results to return.
@@ -187,19 +271,22 @@ class SearchAgent:
 
         Raises:
             AgentValidationError: If query or parameter validation fails.
-            AgentExecutionError: If embedding generation or vector retrieval fails.
+            AgentExecutionError: If embedding generation, vector retrieval, or response processing fails.
         """
-        # 1. Validate query input
-        query_text, request_metadata = self._extract_and_validate_query(request)
-
-        # 2. Determine effective search parameters
-        effective_top_k = self.top_k if top_k is None else top_k
-        effective_min_score = self.min_score if min_score is None else float(min_score)
-        effective_max_results = self.max_results if max_results is None else max_results
-        effective_collection = (
-            self.collection_name
-            if collection_name is None or not collection_name.strip()
-            else collection_name.strip()
+        # 1. Extract and validate query input and search parameters
+        (
+            query_text,
+            effective_top_k,
+            effective_min_score,
+            effective_max_results,
+            effective_collection,
+            request_metadata,
+        ) = self._extract_and_validate_request(
+            request=request,
+            top_k=top_k,
+            min_score=min_score,
+            max_results=max_results,
+            collection_name=collection_name,
         )
 
         self._validate_search_params(
@@ -208,12 +295,12 @@ class SearchAgent:
             max_results=effective_max_results,
         )
 
-        # 3. Generate query embedding vector
+        # 2. Generate query embedding vector
         query_vector = self._generate_query_vector(query_text)
 
-        # 4. Perform vector retrieval via Member 1 retrieval service
+        # 3. Perform vector retrieval via Member 1 retrieval service
         try:
-            retrieval_result: RetrievalServiceResult = retrieve_context(
+            retrieval_result = retrieve_context(
                 query_vector=query_vector,
                 store=self.store,
                 collection_name=effective_collection,
@@ -222,17 +309,40 @@ class SearchAgent:
                 max_results=effective_max_results,
             )
         except Exception as err:
+            if isinstance(err, (AgentValidationError, AgentExecutionError)):
+                raise
             raise AgentExecutionError(
                 f"Retrieval execution failed: {err}"
             ) from err
 
-        # 5. Convert VectorSearchResult objects to AgentCitation objects preserving lineage
-        citations: list[AgentCitation] = [
-            AgentCitation.from_search_result(res)
-            for res in retrieval_result.results
-        ]
+        # 4. Result type safety validation
+        if not isinstance(retrieval_result, RetrievalServiceResult):
+            raise AgentExecutionError(
+                f"Expected RetrievalServiceResult from retrieval service, got {type(retrieval_result).__name__}."
+            )
 
-        # 6. Build response metadata
+        if not isinstance(retrieval_result.results, list):
+            raise AgentExecutionError(
+                f"Expected list of results in RetrievalServiceResult, got {type(retrieval_result.results).__name__}."
+            )
+
+        for idx, item in enumerate(retrieval_result.results):
+            if not isinstance(item, VectorSearchResult):
+                raise AgentExecutionError(
+                    f"Result item at index {idx} is not a VectorSearchResult: got {type(item).__name__}."
+                )
+
+        # 5. Convert VectorSearchResult objects to AgentCitation objects preserving lineage
+        citations: list[AgentCitation] = []
+        for item in retrieval_result.results:
+            try:
+                citations.append(AgentCitation.from_search_result(item))
+            except Exception as err:
+                raise AgentExecutionError(
+                    f"Failed to convert retrieval result to citation: {err}"
+                ) from err
+
+        # 6. Build normalized response metadata
         response_metadata: dict[str, Any] = {
             **request_metadata,
             "query": query_text,
@@ -241,6 +351,11 @@ class SearchAgent:
             "text_results": retrieval_result.text_results,
             "table_results": retrieval_result.table_results,
             "image_results": retrieval_result.image_results,
+            "results_by_modality": {
+                "text": retrieval_result.text_results,
+                "table": retrieval_result.table_results,
+                "image": retrieval_result.image_results,
+            },
             "query_vector_dimension": retrieval_result.query_vector_dimension,
             "collection_name": effective_collection,
             "top_k": effective_top_k,
@@ -260,7 +375,7 @@ class SearchAgent:
 
     def __call__(
         self,
-        request: str | AgentRequest,
+        request: str | AgentRequest | SearchRequest,
         **kwargs: Any,
     ) -> AgentResponse:
         """Allow calling agent instance directly as a callable."""
@@ -268,7 +383,7 @@ class SearchAgent:
 
     def run(
         self,
-        request: str | AgentRequest,
+        request: str | AgentRequest | SearchRequest,
         **kwargs: Any,
     ) -> AgentResponse:
         """Alias for search method."""

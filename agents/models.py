@@ -208,6 +208,178 @@ class AgentRequest:
         )
 
 
+@dataclass(frozen=True)
+class SearchRequest:
+    """Represents a validated, typed search request for the Search Agent.
+
+    Encapsulates user query and optional retrieval configuration parameters
+    (top_k, min_score, max_results, collection_name, session_id, document_filter, metadata).
+
+    Attributes:
+        query: User input query string.
+        top_k: Optional override for initial candidate retrieval count from Qdrant (> 0).
+        min_score: Optional override for minimum similarity score threshold (-1.0 to 1.0).
+        max_results: Optional override for maximum final processed results (> 0).
+        collection_name: Optional override for target Qdrant collection.
+        session_id: Optional session identifier for conversational tracking.
+        document_filter: Optional document filtering criteria.
+        metadata: Optional metadata dictionary.
+    """
+
+    query: str
+    top_k: int | None = None
+    min_score: float | None = None
+    max_results: int | None = None
+    collection_name: str | None = None
+    session_id: str | None = None
+    document_filter: dict[str, Any] | list[str] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate search request fields."""
+        if not isinstance(self.query, str):
+            raise AgentValidationError(
+                f"query must be a string, got {type(self.query).__name__}."
+            )
+        if not self.query.strip():
+            raise AgentValidationError("query cannot be empty or whitespace-only.")
+
+        if self.top_k is not None:
+            if not isinstance(self.top_k, int) or isinstance(self.top_k, bool) or self.top_k <= 0:
+                raise AgentValidationError(
+                    f"top_k must be a positive integer (> 0) or None, got {self.top_k!r}."
+                )
+
+        if self.min_score is not None:
+            if (
+                not isinstance(self.min_score, (int, float))
+                or isinstance(self.min_score, bool)
+                or not math.isfinite(self.min_score)
+                or self.min_score < -1.0
+                or self.min_score > 1.0
+            ):
+                raise AgentValidationError(
+                    f"min_score must be a finite float between -1.0 and 1.0 or None, got {self.min_score!r}."
+                )
+            object.__setattr__(self, "min_score", float(self.min_score))
+
+        if self.max_results is not None:
+            if not isinstance(self.max_results, int) or isinstance(self.max_results, bool) or self.max_results <= 0:
+                raise AgentValidationError(
+                    f"max_results must be a positive integer (> 0) or None, got {self.max_results!r}."
+                )
+
+        if self.collection_name is not None:
+            if not isinstance(self.collection_name, str) or not self.collection_name.strip():
+                raise AgentValidationError(
+                    "collection_name must be a non-empty string or None."
+                )
+            object.__setattr__(self, "collection_name", self.collection_name.strip())
+
+        if self.session_id is not None:
+            if not isinstance(self.session_id, str) or not self.session_id.strip():
+                raise AgentValidationError("session_id must be a non-empty string or None.")
+
+        if self.document_filter is not None:
+            if not isinstance(self.document_filter, (dict, list)):
+                raise AgentValidationError(
+                    "document_filter must be a dict, list of identifiers, or None."
+                )
+
+        if not isinstance(self.metadata, (dict, Mapping)):
+            raise AgentValidationError("metadata must be a dictionary.")
+
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert search request to dictionary representation."""
+        return {
+            "query": self.query,
+            "top_k": self.top_k,
+            "min_score": self.min_score,
+            "max_results": self.max_results,
+            "collection_name": self.collection_name,
+            "session_id": self.session_id,
+            "document_filter": self.document_filter,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SearchRequest:
+        """Construct a SearchRequest from a dictionary.
+
+        Args:
+            data: Dictionary containing search request fields.
+
+        Returns:
+            Validated SearchRequest.
+        """
+        if not isinstance(data, dict):
+            raise AgentValidationError("Input data must be a dictionary.")
+
+        return cls(
+            query=data.get("query", ""),
+            top_k=data.get("top_k"),
+            min_score=data.get("min_score"),
+            max_results=data.get("max_results"),
+            collection_name=data.get("collection_name"),
+            session_id=data.get("session_id"),
+            document_filter=data.get("document_filter"),
+            metadata=data.get("metadata", {}),
+        )
+
+    def to_agent_request(self) -> AgentRequest:
+        """Convert SearchRequest to standard AgentRequest preserving metadata."""
+        meta = dict(self.metadata)
+        if self.top_k is not None:
+            meta["top_k"] = self.top_k
+        if self.min_score is not None:
+            meta["min_score"] = self.min_score
+        if self.max_results is not None:
+            meta["max_results"] = self.max_results
+        if self.collection_name is not None:
+            meta["collection_name"] = self.collection_name
+
+        return AgentRequest(
+            query=self.query,
+            session_id=self.session_id,
+            document_filter=self.document_filter,
+            metadata=meta,
+        )
+
+    @classmethod
+    def from_agent_request(
+        cls,
+        request: AgentRequest,
+        top_k: int | None = None,
+        min_score: float | None = None,
+        max_results: int | None = None,
+        collection_name: str | None = None,
+    ) -> SearchRequest:
+        """Construct a SearchRequest from an AgentRequest with optional parameter overrides."""
+        if not isinstance(request, AgentRequest):
+            raise AgentValidationError(
+                f"Expected AgentRequest instance, got {type(request).__name__}."
+            )
+
+        meta = dict(request.metadata)
+        req_top_k = meta.pop("top_k", None) if top_k is None else top_k
+        req_min_score = meta.pop("min_score", None) if min_score is None else min_score
+        req_max_results = meta.pop("max_results", None) if max_results is None else max_results
+        req_coll = meta.pop("collection_name", None) if collection_name is None else collection_name
+
+        return cls(
+            query=request.query,
+            top_k=req_top_k,
+            min_score=req_min_score,
+            max_results=req_max_results,
+            collection_name=req_coll,
+            session_id=request.session_id,
+            document_filter=request.document_filter,
+            metadata=meta,
+        )
+
+
 @dataclass
 class AgentResponse:
     """Represents a response generated by an agent or multi-agent workflow.

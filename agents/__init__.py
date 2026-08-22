@@ -16,12 +16,14 @@ from agents.models import (
     AgentRequest,
     AgentResponse,
     AgentState,
+    SearchRequest,
 )
 from agents.search_agent import SearchAgent
 
 __all__ = [
     # Domain Models
     "AgentRequest",
+    "SearchRequest",
     "AgentResponse",
     "AgentCitation",
     "AgentState",

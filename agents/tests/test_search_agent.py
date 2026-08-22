@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agents.exceptions import AgentExecutionError, AgentValidationError
-from agents.models import AgentCitation, AgentRequest, AgentResponse
+from agents.models import AgentCitation, AgentRequest, AgentResponse, SearchRequest
 from agents.search_agent import SearchAgent
 from ingestion.models import (
     EmbeddingVectorRecord,
@@ -553,3 +553,323 @@ class TestSearchAgentMember1Integration:
         assert top_cit.content_type == "text"
         assert top_cit.metadata == {"section": "Executive Summary", "content": "Total net income reached 4.2 billion USD."}
         assert "annual_report.pdf" in response.metadata["context"]
+
+
+class TestSearchRequestContract:
+    """Test suite for SearchRequest contract, validation, and conversion helpers."""
+
+    def test_minimal_search_request(self) -> None:
+        """Verify minimal SearchRequest creation with query only."""
+        req = SearchRequest(query="Quarterly revenue breakdown")
+        assert req.query == "Quarterly revenue breakdown"
+        assert req.top_k is None
+        assert req.min_score is None
+        assert req.max_results is None
+        assert req.collection_name is None
+        assert req.session_id is None
+        assert req.document_filter is None
+        assert req.metadata == {}
+
+    def test_full_search_request(self) -> None:
+        """Verify SearchRequest creation with all fields."""
+        req = SearchRequest(
+            query="Detailed balance sheet",
+            top_k=15,
+            min_score=0.35,
+            max_results=8,
+            collection_name="financial_docs",
+            session_id="session-xyz",
+            document_filter={"year": 2023},
+            metadata={"user_tier": "enterprise"},
+        )
+        assert req.query == "Detailed balance sheet"
+        assert req.top_k == 15
+        assert req.min_score == 0.35
+        assert req.max_results == 8
+        assert req.collection_name == "financial_docs"
+        assert req.session_id == "session-xyz"
+        assert req.document_filter == {"year": 2023}
+        assert req.metadata == {"user_tier": "enterprise"}
+
+    @pytest.mark.parametrize("invalid_query", ["", "   ", "\t\n", None, 1234, [1, 2]])
+    def test_invalid_query_raises_validation_error(self, invalid_query: Any) -> None:
+        """Verify invalid query values raise AgentValidationError."""
+        with pytest.raises(AgentValidationError):
+            SearchRequest(query=invalid_query)
+
+    @pytest.mark.parametrize("invalid_top_k", [0, -1, "10", True, 2.5])
+    def test_invalid_top_k_raises_validation_error(self, invalid_top_k: Any) -> None:
+        """Verify invalid top_k raises AgentValidationError."""
+        with pytest.raises(AgentValidationError, match="top_k must be a positive integer"):
+            SearchRequest(query="Valid query", top_k=invalid_top_k)
+
+    @pytest.mark.parametrize("invalid_score", [-1.5, 1.5, "0.5", True, float("nan"), float("inf")])
+    def test_invalid_min_score_raises_validation_error(self, invalid_score: Any) -> None:
+        """Verify invalid min_score raises AgentValidationError."""
+        with pytest.raises(AgentValidationError, match="min_score must be a finite float"):
+            SearchRequest(query="Valid query", min_score=invalid_score)
+
+    @pytest.mark.parametrize("invalid_max", [0, -2, "5", True, 4.5])
+    def test_invalid_max_results_raises_validation_error(self, invalid_max: Any) -> None:
+        """Verify invalid max_results raises AgentValidationError."""
+        with pytest.raises(AgentValidationError, match="max_results must be a positive integer"):
+            SearchRequest(query="Valid query", max_results=invalid_max)
+
+    @pytest.mark.parametrize("invalid_col", ["", "   ", 123])
+    def test_invalid_collection_raises_validation_error(self, invalid_col: Any) -> None:
+        """Verify invalid collection_name raises AgentValidationError."""
+        with pytest.raises(AgentValidationError, match="collection_name must be a non-empty string"):
+            SearchRequest(query="Valid query", collection_name=invalid_col)
+
+    @pytest.mark.parametrize("invalid_session", ["", "   ", 456])
+    def test_invalid_session_id_raises_validation_error(self, invalid_session: Any) -> None:
+        """Verify invalid session_id raises AgentValidationError."""
+        with pytest.raises(AgentValidationError, match="session_id must be a non-empty string"):
+            SearchRequest(query="Valid query", session_id=invalid_session)
+
+    def test_to_dict_and_from_dict_roundtrip(self) -> None:
+        """Verify dictionary serialization roundtrip."""
+        req = SearchRequest(
+            query="Testing roundtrip",
+            top_k=7,
+            min_score=0.4,
+            max_results=3,
+            collection_name="test_col",
+            session_id="sess-007",
+            document_filter=["doc1", "doc2"],
+            metadata={"source": "api"},
+        )
+        d = req.to_dict()
+        reconstructed = SearchRequest.from_dict(d)
+        assert reconstructed == req
+
+    def test_conversion_to_and_from_agent_request(self) -> None:
+        """Verify conversion to and from AgentRequest."""
+        search_req = SearchRequest(
+            query="Convert to AgentRequest",
+            top_k=10,
+            min_score=0.5,
+            max_results=5,
+            collection_name="contracts",
+            session_id="sess-1",
+            document_filter={"type": "pdf"},
+            metadata={"caller": "supervisor"},
+        )
+        agent_req = search_req.to_agent_request()
+        assert isinstance(agent_req, AgentRequest)
+        assert agent_req.query == "Convert to AgentRequest"
+        assert agent_req.session_id == "sess-1"
+        assert agent_req.document_filter == {"type": "pdf"}
+        assert agent_req.metadata["top_k"] == 10
+        assert agent_req.metadata["min_score"] == 0.5
+        assert agent_req.metadata["max_results"] == 5
+        assert agent_req.metadata["collection_name"] == "contracts"
+        assert agent_req.metadata["caller"] == "supervisor"
+
+        reconstructed_search_req = SearchRequest.from_agent_request(agent_req)
+        assert reconstructed_search_req.query == search_req.query
+        assert reconstructed_search_req.top_k == search_req.top_k
+        assert reconstructed_search_req.min_score == search_req.min_score
+        assert reconstructed_search_req.max_results == search_req.max_results
+        assert reconstructed_search_req.collection_name == search_req.collection_name
+        assert reconstructed_search_req.session_id == search_req.session_id
+        assert reconstructed_search_req.document_filter == search_req.document_filter
+        assert reconstructed_search_req.metadata == {"caller": "supervisor"}
+
+
+class TestSearchAgentProductionHardening:
+    """Test suite for Day 23 production hardening, result normalization, and error boundaries."""
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_search_with_search_request_instance(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+        sample_search_results: list[VectorSearchResult],
+    ) -> None:
+        """Verify executing search using typed SearchRequest."""
+        mock_retrieve_context.return_value = RetrievalServiceResult(
+            query_vector_dimension=4,
+            results=sample_search_results,
+            context="Hardened context string",
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(
+            embedding_provider=provider,
+            store=mock_store,
+            collection_name="default_col",
+            top_k=5,
+            min_score=0.0,
+            max_results=5,
+        )
+
+        req = SearchRequest(
+            query="Search request execution",
+            top_k=12,
+            min_score=0.6,
+            max_results=4,
+            collection_name="override_col",
+            session_id="session-prod-1",
+            document_filter={"scope": "global"},
+            metadata={"trace_id": "tr-987"},
+        )
+
+        response = agent.search(req)
+
+        assert response.status == "success"
+        assert response.total_citations == 2
+        assert response.metadata["query"] == "Search request execution"
+        assert response.metadata["top_k"] == 12
+        assert response.metadata["min_score"] == 0.6
+        assert response.metadata["max_results"] == 4
+        assert response.metadata["collection_name"] == "override_col"
+        assert response.metadata["session_id"] == "session-prod-1"
+        assert response.metadata["document_filter"] == {"scope": "global"}
+        assert response.metadata["trace_id"] == "tr-987"
+        assert response.metadata["results_by_modality"] == {"text": 1, "table": 1, "image": 0}
+
+        mock_retrieve_context.assert_called_once_with(
+            query_vector=[0.1, 0.1, 0.1, 0.1],
+            store=mock_store,
+            collection_name="override_col",
+            top_k=12,
+            min_score=0.6,
+            max_results=4,
+        )
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_explicit_argument_precedence_over_search_request(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify explicit kwargs to search() take precedence over SearchRequest attributes."""
+        mock_retrieve_context.return_value = RetrievalServiceResult(
+            query_vector_dimension=4,
+            results=[],
+            context="",
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        req = SearchRequest(query="Precedence test", top_k=8, min_score=0.2, max_results=3, collection_name="req_col")
+        agent.search(req, top_k=25, min_score=0.8, max_results=10, collection_name="kwarg_col")
+
+        mock_retrieve_context.assert_called_once_with(
+            query_vector=[0.1, 0.1, 0.1, 0.1],
+            store=mock_store,
+            collection_name="kwarg_col",
+            top_k=25,
+            min_score=0.8,
+            max_results=10,
+        )
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_non_retrieval_service_result_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify unexpected response type from retrieval service raises AgentExecutionError."""
+        mock_retrieve_context.return_value = "invalid string response"
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="Expected RetrievalServiceResult"):
+            agent.search("Type safety check")
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_non_list_results_in_service_result_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify non-list results attribute raises AgentExecutionError."""
+        mock_retrieve_context.return_value = MagicMock(
+            spec=RetrievalServiceResult,
+            results="not_a_list",
+            context="",
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="Expected list of results"):
+            agent.search("Type safety check")
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_non_vector_search_result_item_raises_execution_error(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify non-VectorSearchResult item in results raises AgentExecutionError."""
+        mock_retrieve_context.return_value = RetrievalServiceResult(
+            query_vector_dimension=4,
+            results=["invalid_result_item"],  # type: ignore[list-item]
+            context="",
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="not a VectorSearchResult"):
+            agent.search("Type safety check")
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_multi_modality_normalization(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Verify multi-modality evidence (text, table, image) is properly normalized."""
+        results = [
+            VectorSearchResult(
+                chunk_id="chk-text",
+                score=0.95,
+                document_id="doc-1",
+                filename="report.pdf",
+                page_number=1,
+                chunk_index=0,
+                content_type="text",
+                content="Text section content.",
+            ),
+            VectorSearchResult(
+                chunk_id="chk-tbl",
+                score=0.88,
+                document_id="doc-1",
+                filename="report.pdf",
+                page_number=2,
+                chunk_index=1,
+                content_type="table",
+                content="Table content.",
+            ),
+            VectorSearchResult(
+                chunk_id="chk-img",
+                score=0.82,
+                document_id="doc-1",
+                filename="report.pdf",
+                page_number=3,
+                chunk_index=2,
+                content_type="image",
+                content="Image content.",
+            ),
+        ]
+        mock_retrieve_context.return_value = RetrievalServiceResult(
+            query_vector_dimension=4,
+            results=results,
+            context="[Source 1] Text\n\n[Source 2] Table\n\n[Source 3] Image",
+        )
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        response = agent.search("Multi modal query")
+
+        assert response.status == "success"
+        assert response.total_citations == 3
+        assert response.metadata["total_results"] == 3
+        assert response.metadata["text_results"] == 1
+        assert response.metadata["table_results"] == 1
+        assert response.metadata["image_results"] == 1
+        assert response.metadata["results_by_modality"] == {"text": 1, "table": 1, "image": 1}
+        assert response.citations[0].content_type == "text"
+        assert response.citations[1].content_type == "table"
+        assert response.citations[2].content_type == "image"
