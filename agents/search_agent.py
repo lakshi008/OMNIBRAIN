@@ -554,7 +554,12 @@ class SearchAgent:
                 ) from err
 
         # 7. Build citation-aware evidence context from the filtered result set
-        evidence_context = self._build_evidence_context(filtered_results)
+        try:
+            evidence_context = self._build_evidence_context(filtered_results)
+        except Exception as err:
+            raise AgentExecutionError(
+                f"Failed to construct evidence context: {err}"
+            ) from err
 
         # 8. Build normalized response metadata from the filtered result set
         final_text = sum(1 for r in filtered_results if r.content_type == "text")

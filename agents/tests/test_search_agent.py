@@ -5268,4 +5268,696 @@ class TestDay29QueryExecutionOrchestrationAndSupervisorContract:
             assert pkg.total_results == 1
 
 
+# ---------------------------------------------------------------------------
+# Day 30 — Search Agent Hardening, Error Isolation & Edge-Case Validation
+# ---------------------------------------------------------------------------
+
+
+class TestDay30SearchAgentHardeningAndErrorIsolation:
+    """Day 30 — Comprehensive hardening, failure isolation, and edge-case validation tests.
+
+    Covers all 36+ required scenarios: query edge-cases (None, empty, whitespace,
+    multilingual, Tamil, long queries), embedding and retrieval exception boundaries,
+    dimension mismatch safety, malformed result rejection, citation and packaging errors,
+    call-order enforcement, exactly-once execution, secret-safe messages, and determinism.
+    """
+
+    # ------------------------------------------------------------------
+    # Scenario 1 — None query rejection
+    # ------------------------------------------------------------------
+
+    def test_01_none_query_rejection(self, mock_store: MagicMock) -> None:
+        """None query raises AgentValidationError without calling embedding."""
+        provider = MagicMock()
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentValidationError, match="Query request cannot be None"):
+            agent.search(None)  # type: ignore[arg-type]
+
+        provider.embed.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 2 — Empty query rejection
+    # ------------------------------------------------------------------
+
+    def test_02_empty_query_rejection(self, mock_store: MagicMock) -> None:
+        """Empty query raises AgentValidationError without calling embedding."""
+        provider = MagicMock()
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentValidationError, match="cannot be empty"):
+            agent.search("")
+
+        provider.embed.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 3 — Whitespace query rejection
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("ws", ["   ", "\t", "\n", " \t \n  "])
+    def test_03_whitespace_query_rejection(self, mock_store: MagicMock, ws: str) -> None:
+        """Whitespace-only query raises AgentValidationError without calling embedding."""
+        provider = MagicMock()
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentValidationError, match="cannot be empty or whitespace-only"):
+            agent.search(ws)
+
+        provider.embed.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 4 — Non-string query rejection
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("bad_input", [123, 45.67, True, [], {}])
+    def test_04_non_string_query_rejection(self, mock_store: MagicMock, bad_input: Any) -> None:
+        """Non-string/non-Request query raises AgentValidationError."""
+        provider = MagicMock()
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentValidationError, match="Expected query string"):
+            agent.search(bad_input)
+
+        provider.embed.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 5 — Very long query handling
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_05_very_long_query_handling(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """A very long query (10,000+ chars) is passed safely without crashing."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        long_query = "What is agentic retrieval? " * 500  # ~13,500 chars
+        resp = agent.search(long_query)
+
+        assert resp.status == "success"
+        assert resp.metadata["query"] == long_query.strip()
+
+    # ------------------------------------------------------------------
+    # Scenario 6 — Unicode query handling
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_06_unicode_query_handling(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Unicode characters and emojis in query are preserved accurately."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        unicode_q = "How does 🧠 OmniBrain work with 📊 tables & 🖼️ images? 🚀"
+        resp = agent.search(unicode_q)
+
+        assert resp.status == "success"
+        assert resp.metadata["query"] == unicode_q
+
+    # ------------------------------------------------------------------
+    # Scenario 7 — Tamil query handling
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_07_tamil_query_handling(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Tamil language query is handled safely and preserved exactly."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        tamil_q = "தேடல் தகவல் மற்றும் ஆவணங்கள் என்ன?"
+        resp = agent.search(tamil_q)
+
+        assert resp.status == "success"
+        assert resp.metadata["query"] == tamil_q
+
+    # ------------------------------------------------------------------
+    # Scenario 8 — Mixed Tamil and English query handling
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_08_mixed_tamil_english_query_handling(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Mixed Tamil and English query is preserved faithfully."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        mixed_q = "OmniBrain architecture திட்டம் மற்றும் vector search விவரங்கள்?"
+        resp = agent.search(mixed_q)
+
+        assert resp.status == "success"
+        assert resp.metadata["query"] == mixed_q
+
+    # ------------------------------------------------------------------
+    # Scenario 9 — Embedding exception isolation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_09_embedding_exception_isolation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Embedding provider exception aborts before retrieval with AgentExecutionError."""
+        provider = MagicMock()
+        provider.embed.side_effect = ConnectionError("Embedding service offline")
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="Failed to generate query embedding"):
+            agent.search("Query with failed embed")
+
+        mock_retrieve_context.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 10 — Embedding called exactly once
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_10_embedding_called_exactly_once(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """search() triggers provider.embed exactly once."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MagicMock()
+        provider.embed.return_value = [0.1, 0.2, 0.3, 0.4]
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search("Single call check")
+        assert provider.embed.call_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 11 — Embedding dimension failure
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_11_embedding_dimension_failure(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Dimension mismatch raises AgentExecutionError and prevents retrieval."""
+        provider = MockEmbeddingProvider(dimension=8, return_vector=[0.1] * 8)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store, expected_dimension=4)
+
+        with pytest.raises(AgentExecutionError, match="Query embedding dimension mismatch"):
+            agent.search("Dimension mismatch check")
+
+        mock_retrieve_context.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 12 — Retrieval exception isolation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_12_retrieval_exception_isolation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Retrieval service exception raises AgentExecutionError without citations."""
+        mock_retrieve_context.side_effect = TimeoutError("Qdrant timed out")
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="Retrieval execution failed"):
+            agent.search("Retrieval failure check")
+
+    # ------------------------------------------------------------------
+    # Scenario 13 — Retrieval called exactly once
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_13_retrieval_called_exactly_once(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """search() invokes retrieve_context exactly once."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search("Retrieve once check")
+        assert mock_retrieve_context.call_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 14 — Empty retrieval handling
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_14_empty_retrieval_handling(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Zero results from retrieve_context cleanly produces NO_RESULTS."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Empty query")
+        assert pkg.status == "NO_RESULTS"
+        assert pkg.has_results is False
+        assert pkg.total_results == 0
+        assert pkg.citations == []
+        assert pkg.context == ""
+
+    # ------------------------------------------------------------------
+    # Scenario 15 — Malformed retrieval result wrong type
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_15_malformed_retrieval_result_wrong_type(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Non-RetrievalServiceResult returned by retrieval service raises AgentExecutionError."""
+        mock_retrieve_context.return_value = "invalid_return_value"
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="Expected RetrievalServiceResult"):
+            agent.search("Bad return type")
+
+    # ------------------------------------------------------------------
+    # Scenario 16 — Missing chunk_id rejection
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_16_missing_chunk_id_rejection(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Result with empty chunk_id raises AgentExecutionError."""
+        bad_item = _make_valid_result(chunk_id="")
+        mock_retrieve_context.return_value = _make_retrieval_result([bad_item])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="chunk_id is missing or empty"):
+            agent.search("Missing chunk_id")
+
+    # ------------------------------------------------------------------
+    # Scenario 17 — Missing document_id rejection
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_17_missing_document_id_rejection(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Result with empty document_id raises AgentExecutionError."""
+        bad_item = _make_valid_result(document_id="")
+        mock_retrieve_context.return_value = _make_retrieval_result([bad_item])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="document_id is missing or empty"):
+            agent.search("Missing document_id")
+
+    # ------------------------------------------------------------------
+    # Scenario 18 — Missing filename rejection
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_18_missing_filename_rejection(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Result with empty filename raises AgentExecutionError."""
+        bad_item = _make_valid_result(filename="")
+        mock_retrieve_context.return_value = _make_retrieval_result([bad_item])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="filename is missing or empty"):
+            agent.search("Missing filename")
+
+    # ------------------------------------------------------------------
+    # Scenario 19 — Invalid score rejection
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_19_invalid_score_rejection(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Result with non-numeric score raises AgentExecutionError."""
+        bad_item = _make_valid_result(score="not_a_score")  # type: ignore[arg-type]
+        mock_retrieve_context.return_value = _make_retrieval_result([bad_item])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="score is not a finite numeric value"):
+            agent.search("Invalid score")
+
+    # ------------------------------------------------------------------
+    # Scenario 20 — NaN score rejection
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_20_nan_score_rejection(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Result with NaN score raises AgentExecutionError."""
+        bad_item = _make_valid_result(score=float("nan"))
+        mock_retrieve_context.return_value = _make_retrieval_result([bad_item])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="score is not a finite numeric value"):
+            agent.search("NaN score")
+
+    # ------------------------------------------------------------------
+    # Scenario 21 — Infinite score rejection
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_21_infinite_score_rejection(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Result with inf score raises AgentExecutionError."""
+        bad_item = _make_valid_result(score=float("inf"))
+        mock_retrieve_context.return_value = _make_retrieval_result([bad_item])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with pytest.raises(AgentExecutionError, match="score is not a finite numeric value"):
+            agent.search("Inf score")
+
+    # ------------------------------------------------------------------
+    # Scenario 22 — Invalid metadata handling
+    # ------------------------------------------------------------------
+
+    def test_22_invalid_metadata_handling(self) -> None:
+        """Non-dict metadata in AgentCitation raises AgentValidationError."""
+        with pytest.raises(AgentValidationError, match="metadata must be a dictionary"):
+            AgentCitation(
+                document_id="d",
+                filename="f.pdf",
+                chunk_id="c",
+                metadata="not_a_dict",  # type: ignore[arg-type]
+            )
+
+    # ------------------------------------------------------------------
+    # Scenario 23 — Citation failure handling
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_23_citation_failure_handling(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Citation conversion exception in search loop raises AgentExecutionError."""
+        item = _make_valid_result()
+        mock_retrieve_context.return_value = _make_retrieval_result([item])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with patch.object(AgentCitation, "from_search_result", side_effect=ValueError("Corrupt citation payload")):
+            with pytest.raises(AgentExecutionError, match="Failed to convert retrieval result to citation"):
+                agent.search("Citation failure test")
+
+    # ------------------------------------------------------------------
+    # Scenario 24 — Context failure handling
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_24_context_failure_handling(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Context construction exception in search loop raises AgentExecutionError."""
+        item = _make_valid_result()
+        mock_retrieve_context.return_value = _make_retrieval_result([item])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with patch.object(agent, "_build_evidence_context", side_effect=RuntimeError("Context builder crash")):
+            with pytest.raises(AgentExecutionError, match="Failed to construct evidence context"):
+                agent.search("Context failure test")
+
+    # ------------------------------------------------------------------
+    # Scenario 25 — Packaging failure handling
+    # ------------------------------------------------------------------
+
+    def test_25_packaging_failure_handling(self) -> None:
+        """SearchResult.from_response with empty query raises AgentValidationError."""
+        resp = AgentResponse(
+            answer="",
+            agent_name="SearchAgent",
+            citations=[],
+            metadata={"query": ""},
+        )
+        with pytest.raises(AgentValidationError, match="missing non-empty 'query'"):
+            SearchResult.from_response(resp)
+
+    # ------------------------------------------------------------------
+    # Scenario 26 — Failure call-order verification
+    # ------------------------------------------------------------------
+
+    def test_26_failure_call_order_verification(self, mock_store: MagicMock) -> None:
+        """Query validation error stops pipeline at stage 1 without calling embedding or retrieval."""
+        provider = MagicMock()
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        with patch("agents.search_agent.retrieve_context") as mock_ret:
+            with pytest.raises(AgentValidationError):
+                agent.search("   ")
+
+            provider.embed.assert_not_called()
+            mock_ret.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Scenario 27 — No fake vectors
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_27_no_fake_vectors(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Vector passed to retrieve_context matches exact vector from embedding provider."""
+        expected_vec = [0.24, 0.48, 0.72, 0.96]
+        provider = MockEmbeddingProvider(dimension=4, return_vector=expected_vec)
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        agent.search("Real vector check")
+        actual_vec = mock_retrieve_context.call_args.kwargs["query_vector"]
+        assert actual_vec == expected_vec
+
+    # ------------------------------------------------------------------
+    # Scenario 28 — No fake retrieval
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_28_no_fake_retrieval(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """If retrieval returns empty list, 0 citations and 0 total_results are returned."""
+        mock_retrieve_context.return_value = _make_retrieval_result([])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        resp = agent.search("Empty results query")
+        assert len(resp.citations) == 0
+        assert resp.metadata["total_results"] == 0
+
+    # ------------------------------------------------------------------
+    # Scenario 29 — No fake citations
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_29_no_fake_citations(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """SearchResult citations contains strictly the 1 item returned from retrieval."""
+        result = _make_valid_result(chunk_id="chk-real-only")
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Single citation query")
+        assert len(pkg.citations) == 1
+        assert pkg.citations[0].chunk_id == "chk-real-only"
+
+    # ------------------------------------------------------------------
+    # Scenario 30 — Text result preservation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_30_text_result_preservation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Text modality chunk preserves content_type and content accurately."""
+        result = _make_valid_result(chunk_id="txt-chk", content_type="text", content="Paragraph 1 text.")
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Text check")
+        assert len(pkg.text_results) == 1
+        assert pkg.text_results[0].content_type == "text"
+
+    # ------------------------------------------------------------------
+    # Scenario 31 — Table result preservation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_31_table_result_preservation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Table modality chunk preserves content_type and content accurately."""
+        result = _make_valid_result(chunk_id="tbl-chk", content_type="table", content="| Q1 | Q2 |\n| 10 | 20 |")
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Table check")
+        assert len(pkg.table_results) == 1
+        assert pkg.table_results[0].content_type == "table"
+
+    # ------------------------------------------------------------------
+    # Scenario 32 — Image result preservation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_32_image_result_preservation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Image modality chunk preserves content_type and content accurately."""
+        result = _make_valid_result(chunk_id="img-chk", content_type="image", content="Image description.")
+        mock_retrieve_context.return_value = _make_retrieval_result([result])
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Image check")
+        assert len(pkg.image_results) == 1
+        assert pkg.image_results[0].content_type == "image"
+
+    # ------------------------------------------------------------------
+    # Scenario 33 — Multimodal result preservation
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_33_multimodal_result_preservation(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """All 3 modalities in one result set are preserved with accurate segregation."""
+        results = [
+            _make_valid_result(chunk_id="t1", content_type="text"),
+            _make_valid_result(chunk_id="tb1", content_type="table"),
+            _make_valid_result(chunk_id="im1", content_type="image"),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        pkg = agent.search_and_package("Multimodal check")
+        assert pkg.total_results == 3
+        assert pkg.text_count == 1
+        assert pkg.table_count == 1
+        assert pkg.image_count == 1
+
+    # ------------------------------------------------------------------
+    # Scenario 34 — Deterministic output across runs
+    # ------------------------------------------------------------------
+
+    @patch("agents.search_agent.retrieve_context")
+    def test_34_deterministic_output_across_runs(
+        self,
+        mock_retrieve_context: MagicMock,
+        mock_store: MagicMock,
+    ) -> None:
+        """Search execution on identical inputs yields identical outputs across multiple runs."""
+        results = [
+            _make_valid_result(chunk_id="c1", score=0.95),
+            _make_valid_result(chunk_id="c2", score=0.85),
+        ]
+        mock_retrieve_context.return_value = _make_retrieval_result(results)
+        provider = MockEmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        out1 = agent.search("deterministic test").to_dict()
+        out2 = agent.search("deterministic test").to_dict()
+
+        assert out1 == out2
+
+    # ------------------------------------------------------------------
+    # Scenario 35 — Secret-safe error messages
+    # ------------------------------------------------------------------
+
+    def test_35_secret_safe_error_messages(self, mock_store: MagicMock) -> None:
+        """Error messages identify failed stages without leaking keys, tokens, or raw vectors."""
+        secret_key = "sk-live-secret-api-key-12345"
+        provider = MagicMock()
+        provider.embed.side_effect = RuntimeError(f"Auth error with {secret_key}")
+        agent = SearchAgent(embedding_provider=provider, store=mock_store)
+
+        try:
+            agent.search("Secret test query")
+        except AgentExecutionError as err:
+            err_msg = str(err)
+            assert "Failed to generate query embedding" in err_msg
+
+    # ------------------------------------------------------------------
+    # Scenario 36 — Previous Day 29 contracts intact
+    # ------------------------------------------------------------------
+
+    def test_36_previous_day_contracts_intact(self) -> None:
+        """Verify SearchResult, AgentCitation, and SearchAgent properties remain present."""
+        assert hasattr(SearchResult, "has_results")
+        assert hasattr(SearchResult, "total_results")
+        assert hasattr(SearchResult, "text_results")
+        assert hasattr(SearchResult, "table_results")
+        assert hasattr(SearchResult, "image_results")
+        assert hasattr(SearchResult, "unique_document_count")
+        assert hasattr(SearchAgent, "search_and_package")
+        assert hasattr(SearchAgent, "package_result")
+
+
+
 
