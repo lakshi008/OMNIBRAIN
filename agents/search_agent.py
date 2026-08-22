@@ -35,6 +35,7 @@ class SearchAgent:
         min_score: float = 0.0,
         max_results: int = 5,
         agent_name: str = "SearchAgent",
+        expected_dimension: int | None = None,
     ) -> None:
         """Initialize SearchAgent with injected dependencies and search parameters.
 
@@ -46,6 +47,11 @@ class SearchAgent:
             min_score: Default minimum similarity score threshold (-1.0 to 1.0).
             max_results: Default maximum final processed results to return.
             agent_name: Name identifier for this agent.
+            expected_dimension: Optional positive integer for pre-retrieval query vector
+                dimension validation. When provided, the generated embedding vector
+                length is checked against this value before calling retrieve_context.
+                A mismatch raises AgentExecutionError immediately — the vector is
+                never truncated or padded.
 
         Raises:
             AgentValidationError: If dependencies or configuration parameters are invalid.
@@ -71,6 +77,16 @@ class SearchAgent:
         if not agent_name or not isinstance(agent_name, str) or not agent_name.strip():
             raise AgentValidationError("agent_name must be a non-empty string.")
 
+        if expected_dimension is not None:
+            if (
+                not isinstance(expected_dimension, int)
+                or isinstance(expected_dimension, bool)
+                or expected_dimension <= 0
+            ):
+                raise AgentValidationError(
+                    f"expected_dimension must be a positive integer or None, got {expected_dimension!r}."
+                )
+
         self.embedding_provider = embedding_provider
         self.store = store
         self.collection_name = collection_name.strip()
@@ -78,6 +94,7 @@ class SearchAgent:
         self.min_score = float(min_score)
         self.max_results = max_results
         self.agent_name = agent_name.strip()
+        self.expected_dimension = expected_dimension
 
     @staticmethod
     def _validate_search_params(top_k: int, min_score: float, max_results: int) -> None:
@@ -278,7 +295,12 @@ class SearchAgent:
         )
 
     def _generate_query_vector(self, query: str) -> list[float]:
-        """Generate embedding vector for user query using Member 1 provider."""
+        """Generate embedding vector for user query using Member 1 provider.
+
+        Validates the produced vector for list type, non-empty length, numeric
+        finite values, and (when self.expected_dimension is set) that the
+        vector length matches the expected collection dimension.
+        """
         try:
             if hasattr(self.embedding_provider, "embed") and callable(getattr(self.embedding_provider, "embed")):
                 vector = self.embedding_provider.embed(query)
@@ -299,9 +321,19 @@ class SearchAgent:
                     raise ValueError(f"Query vector contains invalid numeric value at index {idx}: {val!r}")
                 cleaned_vector.append(float(val))
 
+            # Day 25: dimension consistency check against expected collection dimension
+            if self.expected_dimension is not None and len(cleaned_vector) != self.expected_dimension:
+                raise AgentExecutionError(
+                    f"Query embedding dimension mismatch: expected {self.expected_dimension}, "
+                    f"got {len(cleaned_vector)} from provider. "
+                    "Do not truncate or pad the vector — fix the provider or expected_dimension."
+                )
+
             return cleaned_vector
 
         except Exception as err:
+            if isinstance(err, AgentExecutionError):
+                raise
             if isinstance(err, AgentValidationError):
                 raise
             raise AgentExecutionError(
