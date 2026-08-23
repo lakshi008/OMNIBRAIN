@@ -227,16 +227,19 @@ class VisionExecutionAdapter:
 
             # Stage 3: PREPARING — Prepare visual evidence via Day 34 pipeline
             lifecycle.transition_to(VisionExecutionStage.PREPARING)
-            primary_ev = vision_req.evidence[0]
-            prepared_evidence = prepare_image_evidence(primary_ev)
+            prepared_evidences = [prepare_image_evidence(ev) for ev in vision_req.evidence]
+            primary_prepared = prepared_evidences[0]
 
             # Stage 4: BUILDING_INPUT — Construct validated, lineage-locked VisionModelInput via Day 35 pipeline
             lifecycle.transition_to(VisionExecutionStage.BUILDING_INPUT)
             trace.add_stage("input_prepared")
+            b_meta = dict(kwargs.get("builder_metadata") or {})
+            b_meta["total_evidence_count"] = len(prepared_evidences)
+            b_meta["all_evidence_lineage"] = [e.to_dict() for e in prepared_evidences]
             model_input = build_vision_input(
                 query=vision_req.query,
-                evidence=prepared_evidence,
-                builder_metadata=kwargs.get("builder_metadata"),
+                evidence=primary_prepared,
+                builder_metadata=b_meta,
             )
 
             # Stage 5: EXECUTING — Verify immutability & execute single provider invocation

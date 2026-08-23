@@ -218,6 +218,9 @@ class VisionResultNormalizer:
             if parsed_result.content_type == "image" and model_input.content_type != "image":
                 parsed_result.content_type = model_input.content_type
 
+        if not parsed_result.evidence and isinstance(request, VisionRequest) and request.evidence:
+            parsed_result.evidence = list(request.evidence)
+
         # Sanitize metadata
         sanitized_meta = cls.sanitize_metadata(parsed_result.metadata)
 
