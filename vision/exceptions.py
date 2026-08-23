@@ -2,7 +2,8 @@
 Exceptions for OmniBrain Member 3 Vision Agent subsystem.
 
 Defines the domain exception hierarchy for visual evidence validation,
-request formatting, lineage integrity, and vision processing workflows.
+request formatting, lineage integrity, vision processing workflows,
+and vision model provider abstraction.
 """
 
 from __future__ import annotations
@@ -34,4 +35,44 @@ class VisionProcessingError(VisionAgentError):
     """Raised when visual evidence processing, model inference, or extraction fails."""
 
     def __init__(self, message: str = "Vision processing operation failed.") -> None:
+        super().__init__(message)
+
+
+# ---------------------------------------------------------------------------
+# Provider-specific exception hierarchy (Day 36)
+# ---------------------------------------------------------------------------
+
+
+class VisionProviderError(VisionAgentError):
+    """Base exception for all Vision Model Provider errors."""
+
+    def __init__(self, message: str = "A vision provider error occurred.") -> None:
+        super().__init__(message)
+
+
+class VisionProviderConfigError(VisionProviderError, VisionInputValidationError):
+    """Raised when provider configuration is invalid or missing required parameters."""
+
+    def __init__(self, message: str = "Invalid vision provider configuration.") -> None:
+        super().__init__(message)
+
+
+class VisionProviderExecutionError(VisionProviderError, VisionProcessingError):
+    """Raised when a vision provider encounters an error during execution or inference."""
+
+    def __init__(self, message: str = "Vision provider execution failed.") -> None:
+        super().__init__(message)
+
+
+class VisionProviderUnavailableError(VisionProviderError, VisionProcessingError):
+    """Raised when a requested vision provider is not available, not installed, or not reachable."""
+
+    def __init__(self, message: str = "Vision provider is unavailable.") -> None:
+        super().__init__(message)
+
+
+class VisionUnsupportedCapabilityError(VisionProviderError, VisionProcessingError):
+    """Raised when a vision input requires a capability not supported by the provider."""
+
+    def __init__(self, message: str = "Requested capability is not supported by vision provider.") -> None:
         super().__init__(message)
