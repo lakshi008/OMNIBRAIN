@@ -3,8 +3,8 @@ Vision Execution Adapter for OmniBrain Member 3 Vision Agent.
 
 Orchestrates the multi-stage pipeline connecting incoming VisionRequest inputs,
 retrieval evidence adaptation (Day 33), image preparation (Day 34),
-input building (Day 35), provider execution (Day 36), and execution lifecycle
-hardening (Day 38) into a unified, safe, and deterministic workflow.
+input building (Day 35), provider execution (Day 36), execution lifecycle (Day 38),
+and result normalization & execution trace layer (Day 39) into a unified workflow.
 
 Execution Pipeline:
     VisionRequest
@@ -19,9 +19,11 @@ Execution Pipeline:
           ↓
     Executing (VisionExecutionStage.EXECUTING) -> Immutability & Timeout Boundary
           ↓
+    Result Normalization & Trace (VisionResultNormalizer)
+          ↓
     Completed / Failed / Timeout (VisionExecutionStage.COMPLETED)
           ↓
-    Standardized Result (VisionResult)
+    Standardized VisionResult
 """
 
 from __future__ import annotations
@@ -43,12 +45,16 @@ from vision.input_builder import VisionModelInput, build_vision_input
 from vision.lifecycle import VisionExecutionLifecycle, VisionExecutionStage
 from vision.models import VisionRequest, VisionResult, VisualEvidence
 from vision.provider import VisionModelProvider
+from vision.result_normalizer import (
+    VisionExecutionTrace,
+    VisionResultNormalizer,
+)
 
 
 class VisionExecutionAdapter:
     """Orchestrator between VisionAgent requests and VisionModelProvider backends.
 
-    Encapsulates the complete transformation, validation, and lifecycle hardening:
+    Encapsulates the complete transformation, validation, lifecycle hardening, and normalization:
     1. Input request normalization and stage validation.
     2. Evidence normalization and adaptation via VisualEvidenceAdapter.
     3. Image inspection, format validation, and preparation via Day 34 pipeline.
@@ -56,7 +62,7 @@ class VisionExecutionAdapter:
     5. Input immutability snapshot verification (before and after execution).
     6. Delegated single-invocation execution to an injected VisionModelProvider via Day 36 contract.
     7. Execution lifecycle tracking (pending -> validating -> preparing -> building_input -> executing -> completed/failed/timeout).
-    8. Cause-preserving error propagation and metadata attachment without secrets or fake timing.
+    8. Production-safe result normalization, metadata sanitization, and execution trace recording via Day 39 pipeline.
     """
 
     def __init__(
@@ -169,7 +175,7 @@ class VisionExecutionAdapter:
         evidence: list[Any] | None = None,
         **kwargs: Any,
     ) -> VisionResult:
-        """Execute the multi-stage vision reasoning pipeline with lifecycle state hardening.
+        """Execute the multi-stage vision reasoning pipeline with lifecycle & trace hardening.
 
         Args:
             request: Query string or structured VisionRequest.
@@ -177,23 +183,26 @@ class VisionExecutionAdapter:
             **kwargs: Runtime arguments (e.g. builder_metadata, extra provider parameters).
 
         Returns:
-            Structured VisionResult containing provider output, query, and source lineage.
+            Structured, normalized VisionResult containing provider output and source lineage.
 
         Raises:
             VisionInputValidationError: If request format or parameters are invalid.
             VisionEvidenceError: If visual evidence lineage or preparation fails.
             VisionProviderExecutionError: If provider execution fails.
             VisionTimeoutError: If execution exceeds provider timeout limits.
-            VisionProcessingError: If input immutability or result contract is violated.
+            VisionProcessingError: If result normalization or immutability contract fails.
         """
         lifecycle = VisionExecutionLifecycle(
             provider_name=self._provider.provider_name,
             model_name=self._provider.model_name,
         )
+        trace = VisionExecutionTrace()
+        trace.add_stage("request_received")
 
         try:
             # Stage 1: VALIDATING — Normalize and validate request and evidence
             lifecycle.transition_to(VisionExecutionStage.VALIDATING)
+            trace.add_stage("validation_started")
             vision_req = self._normalize_request(
                 request, evidence=evidence, metadata=kwargs.get("metadata")
             )
@@ -204,8 +213,10 @@ class VisionExecutionAdapter:
                     VisionExecutionStage.COMPLETED,
                     metadata={"notice": "no_evidence_supplied"},
                 )
-                res_meta = dict(vision_req.metadata)
+                trace.add_stage("execution_completed")
+                res_meta = VisionResultNormalizer.sanitize_metadata(vision_req.metadata)
                 res_meta["execution_lifecycle"] = lifecycle.to_dict()
+                res_meta["execution_trace"] = trace.to_dict()
                 return VisionResult(
                     query=vision_req.query,
                     status="no_evidence",
@@ -221,6 +232,7 @@ class VisionExecutionAdapter:
 
             # Stage 4: BUILDING_INPUT — Construct validated, lineage-locked VisionModelInput via Day 35 pipeline
             lifecycle.transition_to(VisionExecutionStage.BUILDING_INPUT)
+            trace.add_stage("input_prepared")
             model_input = build_vision_input(
                 query=vision_req.query,
                 evidence=prepared_evidence,
@@ -229,9 +241,11 @@ class VisionExecutionAdapter:
 
             # Stage 5: EXECUTING — Verify immutability & execute single provider invocation
             lifecycle.transition_to(VisionExecutionStage.EXECUTING)
+            trace.add_stage("provider_started")
             before_snapshot = self._create_input_snapshot(model_input)
 
-            result = self._provider.execute(model_input, **kwargs)
+            raw_result = self._provider.execute(model_input, **kwargs)
+            trace.add_stage("provider_completed")
 
             after_snapshot = self._create_input_snapshot(model_input)
             if before_snapshot != after_snapshot:
@@ -239,19 +253,21 @@ class VisionExecutionAdapter:
                     "VisionModelInput immutability violated during provider execution."
                 )
 
-            # Stage 6: Validate result contract
-            if not isinstance(result, VisionResult):
-                raise VisionProcessingError(
-                    f"Provider returned unexpected result type: {type(result).__name__}, expected VisionResult."
-                )
+            # Stage 6: RESULT NORMALIZATION — Validate, reconcile lineage, and sanitize metadata via Day 39 normalizer
+            normalized_result = VisionResultNormalizer.normalize(
+                result=raw_result,
+                request=vision_req,
+                model_input=model_input,
+                trace=trace,
+            )
 
-            # Stage 7: COMPLETED — Mark lifecycle complete and attach execution metadata
+            # Stage 7: COMPLETED — Mark lifecycle complete and attach final lifecycle state
             lifecycle.transition_to(VisionExecutionStage.COMPLETED)
-            res_meta = dict(result.metadata)
+            res_meta = dict(normalized_result.metadata)
             res_meta["execution_lifecycle"] = lifecycle.to_dict()
-            result.metadata = res_meta
+            normalized_result.metadata = res_meta
 
-            return result
+            return normalized_result
 
         except VisionTimeoutError as err:
             lifecycle.transition_to(VisionExecutionStage.TIMEOUT, error=str(err))
