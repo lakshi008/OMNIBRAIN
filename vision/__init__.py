@@ -5,6 +5,7 @@ Provides visual evidence models, exceptions, and contracts for
 image, chart, and diagram reasoning and multi-modal integration.
 """
 
+from vision.evidence_adapter import VisualEvidenceAdapter
 from vision.exceptions import (
     VisionAgentError,
     VisionEvidenceError,
@@ -25,6 +26,8 @@ __all__ = [
     "VisionRequest",
     "VisionResult",
     "VALID_VISUAL_CONTENT_TYPES",
+    # Adapters
+    "VisualEvidenceAdapter",
     # Agents
     "VisionAgent",
     # Domain Exceptions
