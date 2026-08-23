@@ -3,7 +3,7 @@ OmniBrain Member 3 Vision Agent Subsystem.
 
 Provides visual evidence models, image preparation, input building,
 provider abstractions, execution adapters, lifecycle tracking, result normalization,
-and contracts for multi-modal reasoning.
+and end-to-end pipeline contracts for multi-modal reasoning.
 """
 
 from vision.evidence_adapter import VisualEvidenceAdapter
@@ -44,6 +44,10 @@ from vision.models import (
     VisionRequest,
     VisionResult,
     VisualEvidence,
+)
+from vision.pipeline import (
+    VisionPipeline,
+    run_vision_pipeline,
 )
 from vision.provider import (
     VisionModelProvider,
@@ -90,6 +94,9 @@ __all__ = [
     "VisionResultNormalizer",
     "VisionExecutionTrace",
     "FORBIDDEN_METADATA_KEYS",
+    # Pipeline Orchestrator (Day 40)
+    "VisionPipeline",
+    "run_vision_pipeline",
     # Adapters
     "VisualEvidenceAdapter",
     # Agents
