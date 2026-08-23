@@ -105,18 +105,110 @@ class VisionCancellationToken:
             raise VisionCancellationError(self.reason or "Vision execution was cancelled.")
 
 
+# ---------------------------------------------------------------------------
+# VisionRetryPolicy (Day 47 Retry & Recovery Contract)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VisionRetryPolicy:
+    """Immutable configuration policy for controlled execution retry and recovery.
+
+    Defines maximum attempt thresholds and determines whether specific
+    exceptions are eligible for bounded, execution-local retries.
+
+    Attributes:
+        max_retries: Maximum number of retry attempts beyond the initial attempt (>= 0).
+    """
+
+    max_retries: int = 0
+
+    def __post_init__(self) -> None:
+        """Validate retry policy parameters."""
+        if (
+            isinstance(self.max_retries, bool)
+            or not isinstance(self.max_retries, int)
+            or self.max_retries < 0
+        ):
+            raise VisionInputValidationError(
+                f"max_retries must be a non-negative integer (>= 0), got {self.max_retries!r}."
+            )
+
+    @property
+    def max_attempts(self) -> int:
+        """Total allowable attempts (1 initial attempt + max_retries)."""
+        return 1 + self.max_retries
+
+    def is_retryable(self, exception: Exception) -> bool:
+        """Determine whether a given exception is eligible for retry.
+
+        Non-retryable exceptions:
+          - VisionInputValidationError (invalid query/evidence/parameters)
+          - VisionEvidenceError (corrupted/invalid evidence format)
+          - VisionUnsupportedCapabilityError (unsupported modality/format)
+          - VisionProviderConfigError (misconfigured provider)
+          - VisionCancellationError (explicit cancellation)
+          - VisionTimeoutError (timeout is terminal by design)
+
+        Retryable exceptions:
+          - VisionProviderExecutionError (transient backend failure)
+          - VisionProcessingError (generic transient processing issue)
+
+        Args:
+            exception: Exception instance raised during execution.
+
+        Returns:
+            True if exception is eligible for retry, False otherwise.
+        """
+        if not isinstance(exception, Exception):
+            return False
+
+        from vision.exceptions import (
+            VisionCancellationError,
+            VisionEvidenceError,
+            VisionInputValidationError,
+            VisionProcessingError,
+            VisionProviderConfigError,
+            VisionProviderExecutionError,
+            VisionTimeoutError,
+            VisionUnsupportedCapabilityError,
+        )
+
+        # Strictly non-retryable categories
+        if isinstance(
+            exception,
+            (
+                VisionInputValidationError,
+                VisionEvidenceError,
+                VisionUnsupportedCapabilityError,
+                VisionProviderConfigError,
+                VisionCancellationError,
+                VisionTimeoutError,
+            ),
+        ):
+            return False
+
+        # Retryable categories
+        if isinstance(exception, (VisionProviderExecutionError, VisionProcessingError)):
+            return True
+
+        return False
+
+
 @dataclass
 class VisionExecutionLifecycle:
     """Deterministic, vendor-agnostic container for tracking provider execution lifecycle states.
 
-    Maintains current execution stage, provider identity, error status, and stage-specific
-    metadata without storing secrets, credentials, or fake latency data.
+    Maintains current execution stage, provider identity, error status, attempt counts,
+    and stage-specific metadata without storing secrets, credentials, or fake latency data.
 
     Attributes:
         stage: Current execution stage string (must be in VisionExecutionStage.ALL_STAGES).
         provider_name: Identifier of the target vision provider.
         model_name: Designated vision model name.
         error: Error message string if execution reached a failed, timeout, or cancelled state.
+        attempt_count: Number of provider execution attempts made.
+        retry_count: Number of retry attempts made beyond initial execution.
         metadata: Stage transition metadata dictionary.
     """
 
@@ -124,6 +216,8 @@ class VisionExecutionLifecycle:
     provider_name: str = "unknown"
     model_name: str = "unknown"
     error: str | None = None
+    attempt_count: int = 1
+    retry_count: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -248,6 +342,8 @@ class VisionExecutionLifecycle:
             "provider_name": self.provider_name,
             "model_name": self.model_name,
             "error": self.error,
+            "attempt_count": self.attempt_count,
+            "retry_count": self.retry_count,
             "is_completed": self.is_completed,
             "is_cancelled": self.is_cancelled,
             "is_failed": self.is_failed,
@@ -266,7 +362,7 @@ class VisionExecutionObservation:
     """Immutable, structured execution observation container for the Vision subsystem.
 
     Provides lightweight, offline observability over the execution lifecycle,
-    trace stages, provider invocation status, and result metadata without
+    trace stages, provider invocation status, attempt counts, and result metadata without
     external telemetry, network dependencies, or production overhead.
 
     Attributes:
@@ -278,6 +374,8 @@ class VisionExecutionObservation:
         is_terminal: Whether execution reached a terminal state.
         is_cancelled: Whether execution was cancelled.
         error: Optional error description string.
+        attempt_count: Total provider execution attempts made.
+        retry_count: Number of retried attempts made beyond initial execution.
         provider_called: Whether the provider backend was invoked during execution.
         evidence_count: Number of visual evidence items processed.
         result_status: Status string from VisionResult if available.
@@ -293,6 +391,8 @@ class VisionExecutionObservation:
     is_terminal: bool
     is_cancelled: bool = False
     error: str | None = None
+    attempt_count: int = 1
+    retry_count: int = 0
     provider_called: bool = False
     evidence_count: int = 0
     result_status: str | None = None
@@ -319,6 +419,20 @@ class VisionExecutionObservation:
         if self.error is not None and not isinstance(self.error, str):
             raise VisionInputValidationError("error must be a string or None.")
 
+        if (
+            isinstance(self.attempt_count, bool)
+            or not isinstance(self.attempt_count, int)
+            or self.attempt_count < 1
+        ):
+            raise VisionInputValidationError("attempt_count must be a positive integer (>= 1).")
+
+        if (
+            isinstance(self.retry_count, bool)
+            or not isinstance(self.retry_count, int)
+            or self.retry_count < 0
+        ):
+            raise VisionInputValidationError("retry_count must be a non-negative integer (>= 0).")
+
         if isinstance(self.stages, (list, set, frozenset)):
             object.__setattr__(self, "stages", tuple(str(s) for s in self.stages))
         elif not isinstance(self.stages, tuple):
@@ -339,6 +453,8 @@ class VisionExecutionObservation:
             "is_failed": self.is_failed,
             "is_terminal": self.is_terminal,
             "error": self.error,
+            "attempt_count": self.attempt_count,
+            "retry_count": self.retry_count,
             "provider_called": self.provider_called,
             "evidence_count": self.evidence_count,
             "result_status": self.result_status,
@@ -400,6 +516,9 @@ class VisionExecutionObservation:
         if error is not None:
             error = str(error)
 
+        attempt_count = int(lifecycle_data.get("attempt_count", 1))
+        retry_count = int(lifecycle_data.get("retry_count", 0))
+
         is_completed = bool(
             lifecycle_data.get(
                 "is_completed",
@@ -430,6 +549,8 @@ class VisionExecutionObservation:
             is_failed=is_failed,
             is_terminal=is_terminal,
             error=error,
+            attempt_count=attempt_count,
+            retry_count=retry_count,
             provider_called=provider_called,
             evidence_count=evidence_count,
             result_status=str(status) if status is not None else None,
@@ -484,6 +605,8 @@ class VisionExecutionObservation:
             is_failed=lifecycle.is_failed,
             is_terminal=lifecycle.is_terminal,
             error=lifecycle.error,
+            attempt_count=lifecycle.attempt_count,
+            retry_count=lifecycle.retry_count,
             provider_called=provider_called,
             evidence_count=evidence_count,
             result_status=result_status,

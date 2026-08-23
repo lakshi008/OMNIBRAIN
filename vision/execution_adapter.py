@@ -44,7 +44,11 @@ from vision.exceptions import (
 )
 from vision.image_preparation import PreparedImageEvidence, prepare_image_evidence
 from vision.input_builder import VisionModelInput, build_vision_input
-from vision.lifecycle import VisionExecutionLifecycle, VisionExecutionStage
+from vision.lifecycle import (
+    VisionExecutionLifecycle,
+    VisionExecutionStage,
+    VisionRetryPolicy,
+)
 from vision.models import VisionRequest, VisionResult, VisualEvidence
 from vision.provider import VisionModelProvider
 from vision.result_normalizer import (
@@ -235,6 +239,29 @@ class VisionExecutionAdapter:
                     f"timeout must be a positive finite number (> 0), got {timeout_val!r}."
                 )
 
+        # Resolve retry policy
+        retry_policy: VisionRetryPolicy
+        raw_policy = kwargs.get("retry_policy")
+        if raw_policy is not None:
+            if not isinstance(raw_policy, VisionRetryPolicy):
+                raise VisionInputValidationError(
+                    f"retry_policy must be a VisionRetryPolicy instance, got {type(raw_policy).__name__}."
+                )
+            retry_policy = raw_policy
+        elif "max_retries" in kwargs and kwargs["max_retries"] is not None:
+            max_retries_val = kwargs["max_retries"]
+            if (
+                isinstance(max_retries_val, bool)
+                or not isinstance(max_retries_val, int)
+                or max_retries_val < 0
+            ):
+                raise VisionInputValidationError(
+                    f"max_retries must be a non-negative integer (>= 0), got {max_retries_val!r}."
+                )
+            retry_policy = VisionRetryPolicy(max_retries=max_retries_val)
+        else:
+            retry_policy = VisionRetryPolicy(max_retries=0)
+
         lifecycle = VisionExecutionLifecycle(
             provider_name=self._provider.provider_name,
             model_name=self._provider.model_name,
@@ -292,20 +319,46 @@ class VisionExecutionAdapter:
                 builder_metadata=b_meta,
             )
 
-            # Stage 5: EXECUTING — Verify immutability & execute single provider invocation
-            self._check_cancellation(cancel_token, lifecycle)
+            # Stage 5: EXECUTING — Verify immutability & execute bounded provider attempt loop
             lifecycle.transition_to(VisionExecutionStage.EXECUTING)
-            trace.add_stage("provider_started")
-            before_snapshot = self._create_input_snapshot(model_input)
 
-            raw_result = self._provider.execute(model_input, **kwargs)
-            trace.add_stage("provider_completed")
+            raw_result = None
+            attempt = 0
+            while attempt <= retry_policy.max_retries:
+                attempt += 1
+                lifecycle.attempt_count = attempt
+                lifecycle.retry_count = attempt - 1
 
-            after_snapshot = self._create_input_snapshot(model_input)
-            if before_snapshot != after_snapshot:
-                raise VisionProcessingError(
-                    "VisionModelInput immutability violated during provider execution."
-                )
+                self._check_cancellation(cancel_token, lifecycle)
+
+                trace.add_stage("provider_started")
+                before_snapshot = self._create_input_snapshot(model_input)
+
+                try:
+                    raw_result = self._provider.execute(model_input, **kwargs)
+                    trace.add_stage("provider_completed")
+
+                    after_snapshot = self._create_input_snapshot(model_input)
+                    if before_snapshot != after_snapshot:
+                        raise VisionProcessingError(
+                            "VisionModelInput immutability violated during provider execution."
+                        )
+                    break
+                except Exception as err:
+                    after_snapshot = self._create_input_snapshot(model_input)
+                    if before_snapshot != after_snapshot:
+                        raise VisionProcessingError(
+                            "VisionModelInput immutability violated during provider execution."
+                        )
+
+                    self._check_cancellation(cancel_token, lifecycle)
+
+                    if attempt <= retry_policy.max_retries and retry_policy.is_retryable(err):
+                        trace.add_stage("retry_attempted")
+                        self._check_cancellation(cancel_token, lifecycle)
+                        continue
+                    else:
+                        raise
 
             # Stage 6: RESULT NORMALIZATION — Validate, reconcile lineage, and sanitize metadata via Day 39 normalizer
             normalized_result = VisionResultNormalizer.normalize(

@@ -41,6 +41,7 @@ from vision.lifecycle import (
     VisionExecutionLifecycle,
     VisionExecutionObservation,
     VisionExecutionStage,
+    VisionRetryPolicy,
 )
 from vision.models import (
     VALID_VISUAL_CONTENT_TYPES,
@@ -88,12 +89,13 @@ __all__ = [
     "VisionProviderRegistry",
     "VisionProviderConfig",
     "VisionProviderCapabilities",
-    # Execution Adapter & Lifecycle (Day 37, 38, 45, 46)
+    # Execution Adapter & Lifecycle (Day 37, 38, 45, 46, 47)
     "VisionExecutionAdapter",
     "VisionExecutionStage",
     "VisionExecutionLifecycle",
     "VisionExecutionObservation",
     "VisionCancellationToken",
+    "VisionRetryPolicy",
     "execute_vision_request",
     # Result Normalizer & Execution Trace (Day 39)
     "VisionResultNormalizer",
