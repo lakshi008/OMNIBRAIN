@@ -28,11 +28,13 @@ Execution Pipeline:
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from vision.evidence_adapter import VisualEvidenceAdapter
 from vision.exceptions import (
     VisionAgentError,
+    VisionCancellationError,
     VisionEvidenceError,
     VisionInputValidationError,
     VisionProcessingError,
@@ -61,7 +63,7 @@ class VisionExecutionAdapter:
     4. VisionModelInput construction and lineage locking via Day 35 pipeline.
     5. Input immutability snapshot verification (before and after execution).
     6. Delegated single-invocation execution to an injected VisionModelProvider via Day 36 contract.
-    7. Execution lifecycle tracking (pending -> validating -> preparing -> building_input -> executing -> completed/failed/timeout).
+    7. Execution lifecycle tracking (pending -> validating -> preparing -> building_input -> executing -> completed/failed/timeout/cancelled).
     8. Production-safe result normalization, metadata sanitization, and execution trace recording via Day 39 pipeline.
     """
 
@@ -94,6 +96,33 @@ class VisionExecutionAdapter:
     def provider(self) -> VisionModelProvider:
         """Return the configured VisionModelProvider backend."""
         return self._provider
+
+    @staticmethod
+    def _check_cancellation(token: Any, lifecycle: VisionExecutionLifecycle) -> None:
+        """Check cancellation token and transition lifecycle if cancelled."""
+        if token is None:
+            return
+        if hasattr(token, "is_cancelled") and token.is_cancelled:
+            reason = getattr(token, "reason", None) or "Vision execution was cancelled."
+            if not lifecycle.is_terminal:
+                lifecycle.transition_to(VisionExecutionStage.CANCELLED, error=reason)
+            raise VisionCancellationError(reason)
+        if hasattr(token, "is_set") and token.is_set():
+            reason = "Vision execution was cancelled via event signal."
+            if not lifecycle.is_terminal:
+                lifecycle.transition_to(VisionExecutionStage.CANCELLED, error=reason)
+            raise VisionCancellationError(reason)
+        if callable(token) and not isinstance(token, type):
+            if token():
+                reason = "Vision execution was cancelled via callback."
+                if not lifecycle.is_terminal:
+                    lifecycle.transition_to(VisionExecutionStage.CANCELLED, error=reason)
+                raise VisionCancellationError(reason)
+        if isinstance(token, bool) and token:
+            reason = "Vision execution was cancelled."
+            if not lifecycle.is_terminal:
+                lifecycle.transition_to(VisionExecutionStage.CANCELLED, error=reason)
+            raise VisionCancellationError(reason)
 
     def _normalize_request(
         self,
@@ -180,7 +209,7 @@ class VisionExecutionAdapter:
         Args:
             request: Query string or structured VisionRequest.
             evidence: Optional list of VisualEvidence, citations, search results, or chunks.
-            **kwargs: Runtime arguments (e.g. builder_metadata, extra provider parameters).
+            **kwargs: Runtime arguments (e.g. builder_metadata, cancellation_token, timeout).
 
         Returns:
             Structured, normalized VisionResult containing provider output and source lineage.
@@ -188,16 +217,33 @@ class VisionExecutionAdapter:
         Raises:
             VisionInputValidationError: If request format or parameters are invalid.
             VisionEvidenceError: If visual evidence lineage or preparation fails.
+            VisionCancellationError: If execution was cancelled.
             VisionProviderExecutionError: If provider execution fails.
             VisionTimeoutError: If execution exceeds provider timeout limits.
             VisionProcessingError: If result normalization or immutability contract fails.
         """
+        # Validate optional timeout parameter
+        if "timeout" in kwargs and kwargs["timeout"] is not None:
+            timeout_val = kwargs["timeout"]
+            if (
+                isinstance(timeout_val, bool)
+                or not isinstance(timeout_val, (int, float))
+                or not math.isfinite(timeout_val)
+                or timeout_val <= 0.0
+            ):
+                raise VisionInputValidationError(
+                    f"timeout must be a positive finite number (> 0), got {timeout_val!r}."
+                )
+
         lifecycle = VisionExecutionLifecycle(
             provider_name=self._provider.provider_name,
             model_name=self._provider.model_name,
         )
         trace = VisionExecutionTrace()
         trace.add_stage("request_received")
+
+        cancel_token = kwargs.get("cancellation_token") or kwargs.get("cancel_token")
+        self._check_cancellation(cancel_token, lifecycle)
 
         try:
             # Stage 1: VALIDATING — Normalize and validate request and evidence
@@ -206,6 +252,8 @@ class VisionExecutionAdapter:
             vision_req = self._normalize_request(
                 request, evidence=evidence, metadata=kwargs.get("metadata")
             )
+
+            self._check_cancellation(cancel_token, lifecycle)
 
             # Stage 2: Handle no-evidence requests gracefully
             if not vision_req.has_evidence:
@@ -226,11 +274,13 @@ class VisionExecutionAdapter:
                 )
 
             # Stage 3: PREPARING — Prepare visual evidence via Day 34 pipeline
+            self._check_cancellation(cancel_token, lifecycle)
             lifecycle.transition_to(VisionExecutionStage.PREPARING)
             prepared_evidences = [prepare_image_evidence(ev) for ev in vision_req.evidence]
             primary_prepared = prepared_evidences[0]
 
             # Stage 4: BUILDING_INPUT — Construct validated, lineage-locked VisionModelInput via Day 35 pipeline
+            self._check_cancellation(cancel_token, lifecycle)
             lifecycle.transition_to(VisionExecutionStage.BUILDING_INPUT)
             trace.add_stage("input_prepared")
             b_meta = dict(kwargs.get("builder_metadata") or {})
@@ -243,6 +293,7 @@ class VisionExecutionAdapter:
             )
 
             # Stage 5: EXECUTING — Verify immutability & execute single provider invocation
+            self._check_cancellation(cancel_token, lifecycle)
             lifecycle.transition_to(VisionExecutionStage.EXECUTING)
             trace.add_stage("provider_started")
             before_snapshot = self._create_input_snapshot(model_input)
@@ -273,8 +324,14 @@ class VisionExecutionAdapter:
             return normalized_result
 
         except VisionTimeoutError as err:
-            lifecycle.transition_to(VisionExecutionStage.TIMEOUT, error=str(err))
+            if not lifecycle.is_terminal:
+                lifecycle.transition_to(VisionExecutionStage.TIMEOUT, error=str(err))
             raise VisionTimeoutError(f"Vision provider execution timed out: {err}") from err
+
+        except VisionCancellationError as err:
+            if not lifecycle.is_terminal:
+                lifecycle.transition_to(VisionExecutionStage.CANCELLED, error=str(err))
+            raise
 
         except (VisionInputValidationError, VisionEvidenceError, VisionProviderError, VisionProcessingError) as err:
             if not lifecycle.is_terminal:

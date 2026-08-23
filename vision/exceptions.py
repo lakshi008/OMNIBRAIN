@@ -83,3 +83,11 @@ class VisionTimeoutError(VisionProviderError, VisionProcessingError):
 
     def __init__(self, message: str = "Vision provider execution timed out.") -> None:
         super().__init__(message)
+
+
+class VisionCancellationError(VisionAgentError):
+    """Raised when vision execution is cancelled before or during processing."""
+
+    def __init__(self, message: str = "Vision execution was cancelled.") -> None:
+        super().__init__(message)
+

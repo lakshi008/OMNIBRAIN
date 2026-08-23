@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import threading
 from typing import Any
 
 from vision.exceptions import VisionInputValidationError
@@ -31,6 +32,7 @@ class VisionExecutionStage:
     COMPLETED: str = "completed"
     FAILED: str = "failed"
     TIMEOUT: str = "timeout"
+    CANCELLED: str = "cancelled"
 
     ALL_STAGES: frozenset[str] = frozenset({
         "pending",
@@ -41,9 +43,66 @@ class VisionExecutionStage:
         "completed",
         "failed",
         "timeout",
+        "cancelled",
     })
 
-    TERMINAL_STAGES: frozenset[str] = frozenset({"completed", "failed", "timeout"})
+    TERMINAL_STAGES: frozenset[str] = frozenset({
+        "completed",
+        "failed",
+        "timeout",
+        "cancelled",
+    })
+
+
+# ---------------------------------------------------------------------------
+# VisionCancellationToken (Day 46 Cancellation Contract)
+# ---------------------------------------------------------------------------
+
+
+class VisionCancellationToken:
+    """Lightweight, thread-safe cancellation token for Vision execution.
+
+    Allows callers to explicitly request cancellation of an ongoing or pending
+    vision reasoning pipeline execution without global mutable state.
+    """
+
+    def __init__(self) -> None:
+        self._is_cancelled: bool = False
+        self._reason: str | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Return True if cancellation has been requested."""
+        with self._lock:
+            return self._is_cancelled
+
+    @property
+    def reason(self) -> str | None:
+        """Return the cancellation reason string if cancelled."""
+        with self._lock:
+            return self._reason
+
+    def cancel(self, reason: str = "Vision execution was cancelled by caller.") -> None:
+        """Signal cancellation for this token.
+
+        Args:
+            reason: Optional description of why cancellation was requested.
+        """
+        with self._lock:
+            self._is_cancelled = True
+            self._reason = reason
+
+    def raise_if_cancelled(self) -> None:
+        """Raise VisionCancellationError if cancellation was requested.
+
+        Raises:
+            VisionCancellationError: If is_cancelled is True.
+        """
+        if self.is_cancelled:
+            from vision.exceptions import VisionCancellationError
+
+            raise VisionCancellationError(self.reason or "Vision execution was cancelled.")
 
 
 @dataclass
@@ -57,7 +116,7 @@ class VisionExecutionLifecycle:
         stage: Current execution stage string (must be in VisionExecutionStage.ALL_STAGES).
         provider_name: Identifier of the target vision provider.
         model_name: Designated vision model name.
-        error: Error message string if execution reached a failed or timeout state.
+        error: Error message string if execution reached a failed, timeout, or cancelled state.
         metadata: Stage transition metadata dictionary.
     """
 
@@ -97,14 +156,37 @@ class VisionExecutionLifecycle:
         return self.stage == VisionExecutionStage.COMPLETED and self.error is None
 
     @property
+    def is_cancelled(self) -> bool:
+        """Whether execution was cancelled."""
+        return self.stage == VisionExecutionStage.CANCELLED
+
+    @property
     def is_failed(self) -> bool:
-        """Whether execution reached a failed or timeout stage."""
-        return self.stage in (VisionExecutionStage.FAILED, VisionExecutionStage.TIMEOUT) or self.error is not None
+        """Whether execution reached a failed, timeout, or cancelled stage."""
+        return (
+            self.stage in (VisionExecutionStage.FAILED, VisionExecutionStage.TIMEOUT, VisionExecutionStage.CANCELLED)
+            or self.error is not None
+        )
 
     @property
     def is_terminal(self) -> bool:
         """Whether execution reached a terminal state."""
         return self.stage in VisionExecutionStage.TERMINAL_STAGES
+
+    def cancel(self, reason: str = "Vision execution was cancelled by caller.") -> None:
+        """Cancel execution lifecycle.
+
+        If execution is already in a terminal state (COMPLETED, FAILED, TIMEOUT),
+        raises VisionInputValidationError to prevent altering terminal state.
+        If already CANCELLED, this is an idempotent no-op.
+        """
+        if self.is_terminal:
+            if self.stage == VisionExecutionStage.CANCELLED:
+                return
+            raise VisionInputValidationError(
+                f"Cannot transition execution lifecycle from terminal stage '{self.stage}' to 'cancelled'."
+            )
+        self.transition_to(VisionExecutionStage.CANCELLED, error=reason)
 
     def transition_to(
         self,
@@ -167,6 +249,7 @@ class VisionExecutionLifecycle:
             "model_name": self.model_name,
             "error": self.error,
             "is_completed": self.is_completed,
+            "is_cancelled": self.is_cancelled,
             "is_failed": self.is_failed,
             "is_terminal": self.is_terminal,
             "metadata": dict(self.metadata),
@@ -193,6 +276,7 @@ class VisionExecutionObservation:
         is_completed: Whether execution reached successful completion.
         is_failed: Whether execution reached a failed or timeout state.
         is_terminal: Whether execution reached a terminal state.
+        is_cancelled: Whether execution was cancelled.
         error: Optional error description string.
         provider_called: Whether the provider backend was invoked during execution.
         evidence_count: Number of visual evidence items processed.
@@ -207,6 +291,7 @@ class VisionExecutionObservation:
     is_completed: bool
     is_failed: bool
     is_terminal: bool
+    is_cancelled: bool = False
     error: str | None = None
     provider_called: bool = False
     evidence_count: int = 0
@@ -250,6 +335,7 @@ class VisionExecutionObservation:
             "provider_name": self.provider_name,
             "model_name": self.model_name,
             "is_completed": self.is_completed,
+            "is_cancelled": self.is_cancelled,
             "is_failed": self.is_failed,
             "is_terminal": self.is_terminal,
             "error": self.error,
@@ -320,10 +406,13 @@ class VisionExecutionObservation:
                 stage == VisionExecutionStage.COMPLETED and error is None and status != "error",
             )
         )
+        is_cancelled = bool(
+            lifecycle_data.get("is_cancelled", stage == VisionExecutionStage.CANCELLED)
+        )
         is_failed = bool(
             lifecycle_data.get(
                 "is_failed",
-                stage in (VisionExecutionStage.FAILED, VisionExecutionStage.TIMEOUT)
+                stage in (VisionExecutionStage.FAILED, VisionExecutionStage.TIMEOUT, VisionExecutionStage.CANCELLED)
                 or error is not None
                 or status == "error",
             )
@@ -337,6 +426,7 @@ class VisionExecutionObservation:
             provider_name=provider_name,
             model_name=model_name,
             is_completed=is_completed,
+            is_cancelled=is_cancelled,
             is_failed=is_failed,
             is_terminal=is_terminal,
             error=error,
@@ -390,6 +480,7 @@ class VisionExecutionObservation:
             provider_name=lifecycle.provider_name,
             model_name=lifecycle.model_name,
             is_completed=lifecycle.is_completed,
+            is_cancelled=lifecycle.is_cancelled,
             is_failed=lifecycle.is_failed,
             is_terminal=lifecycle.is_terminal,
             error=lifecycle.error,

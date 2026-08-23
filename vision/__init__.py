@@ -9,6 +9,7 @@ and end-to-end pipeline contracts for multi-modal reasoning.
 from vision.evidence_adapter import VisualEvidenceAdapter
 from vision.exceptions import (
     VisionAgentError,
+    VisionCancellationError,
     VisionEvidenceError,
     VisionInputValidationError,
     VisionProcessingError,
@@ -36,6 +37,7 @@ from vision.input_builder import (
     build_vision_input,
 )
 from vision.lifecycle import (
+    VisionCancellationToken,
     VisionExecutionLifecycle,
     VisionExecutionObservation,
     VisionExecutionStage,
@@ -86,11 +88,12 @@ __all__ = [
     "VisionProviderRegistry",
     "VisionProviderConfig",
     "VisionProviderCapabilities",
-    # Execution Adapter & Lifecycle (Day 37 & 38)
+    # Execution Adapter & Lifecycle (Day 37, 38, 45, 46)
     "VisionExecutionAdapter",
     "VisionExecutionStage",
     "VisionExecutionLifecycle",
     "VisionExecutionObservation",
+    "VisionCancellationToken",
     "execute_vision_request",
     # Result Normalizer & Execution Trace (Day 39)
     "VisionResultNormalizer",
@@ -105,6 +108,7 @@ __all__ = [
     "VisionAgent",
     # Domain Exceptions
     "VisionAgentError",
+    "VisionCancellationError",
     "VisionInputValidationError",
     "VisionEvidenceError",
     "VisionProcessingError",
