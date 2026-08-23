@@ -2,7 +2,7 @@
 OmniBrain Member 3 Vision Agent Subsystem.
 
 Provides visual evidence models, image preparation, input building,
-provider abstractions, and contracts for multi-modal reasoning.
+provider abstractions, execution adapters, and contracts for multi-modal reasoning.
 """
 
 from vision.evidence_adapter import VisualEvidenceAdapter
@@ -16,6 +16,10 @@ from vision.exceptions import (
     VisionProviderExecutionError,
     VisionProviderUnavailableError,
     VisionUnsupportedCapabilityError,
+)
+from vision.execution_adapter import (
+    VisionExecutionAdapter,
+    execute_vision_request,
 )
 from vision.image_preparation import (
     SUPPORTED_IMAGE_FORMATS,
@@ -66,6 +70,9 @@ __all__ = [
     "VisionProviderRegistry",
     "VisionProviderConfig",
     "VisionProviderCapabilities",
+    # Execution Adapter (Day 37)
+    "VisionExecutionAdapter",
+    "execute_vision_request",
     # Adapters
     "VisualEvidenceAdapter",
     # Agents

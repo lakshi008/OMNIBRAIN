@@ -129,6 +129,7 @@ class VisualEvidence:
             chunk_index=data.get("chunk_index", 0),
             content_type=data.get("content_type", "image"),
             image_path=data.get("image_path"),
+            image_bytes=data.get("image_bytes"),
             image_format=data.get("image_format"),
             width=data.get("width"),
             height=data.get("height"),
@@ -160,7 +161,12 @@ class VisualEvidence:
                 f"Expected AgentCitation instance, got {type(citation).__name__}."
             )
 
-        chunk_idx = citation.metadata.get("chunk_index", 0) if isinstance(citation.metadata, dict) else 0
+        meta = citation.metadata if isinstance(citation.metadata, dict) else {}
+        chunk_idx = meta.get("chunk_index", 0)
+        img_path = image_path if image_path is not None else meta.get("image_path")
+        img_bytes = image_bytes if image_bytes is not None else meta.get("image_bytes")
+        img_fmt = image_format if image_format is not None else meta.get("image_format")
+
         return cls(
             document_id=citation.document_id,
             filename=citation.filename,
@@ -168,9 +174,9 @@ class VisualEvidence:
             page_number=citation.page_number,
             chunk_index=chunk_idx if isinstance(chunk_idx, int) and not isinstance(chunk_idx, bool) and chunk_idx >= 0 else 0,
             content_type=citation.content_type,
-            image_path=image_path,
-            image_bytes=image_bytes,
-            image_format=image_format,
+            image_path=img_path,
+            image_bytes=img_bytes,
+            image_format=img_fmt,
             metadata=dict(citation.metadata),
         )
 
@@ -198,6 +204,11 @@ class VisualEvidence:
                 f"Expected VectorSearchResult instance, got {type(result).__name__}."
             )
 
+        meta = result.metadata if isinstance(result.metadata, dict) else {}
+        img_path = image_path if image_path is not None else meta.get("image_path")
+        img_bytes = image_bytes if image_bytes is not None else meta.get("image_bytes")
+        img_fmt = image_format if image_format is not None else meta.get("image_format")
+
         return cls(
             document_id=result.document_id,
             filename=result.filename,
@@ -205,9 +216,9 @@ class VisualEvidence:
             page_number=result.page_number,
             chunk_index=result.chunk_index,
             content_type=result.content_type,
-            image_path=image_path,
-            image_bytes=image_bytes,
-            image_format=image_format,
+            image_path=img_path,
+            image_bytes=img_bytes,
+            image_format=img_fmt,
             description=result.content,
             metadata=dict(result.metadata),
         )

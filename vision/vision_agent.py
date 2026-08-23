@@ -15,8 +15,7 @@ from vision.exceptions import (
     VisionInputValidationError,
     VisionProcessingError,
 )
-from vision.image_preparation import PreparedImageEvidence, prepare_image_evidence
-from vision.input_builder import VisionModelInput, build_vision_input
+from vision.execution_adapter import VisionExecutionAdapter
 from vision.models import VisionRequest, VisionResult, VisualEvidence
 from vision.provider import VisionModelProvider
 
@@ -24,9 +23,9 @@ from vision.provider import VisionModelProvider
 class VisionAgent:
     """Agent responsible for visual evidence reasoning and diagram/chart analysis.
 
-    Coordinates between retrieval evidence, Day 34 image preparation, Day 35 input
-    building, and Day 36 VisionModelProvider abstraction without tight coupling to
-    any specific model vendor.
+    Coordinates between retrieval evidence, Day 33 evidence adaptation, Day 34 image
+    preparation, Day 35 input building, and Day 36 VisionModelProvider abstraction
+    via the Day 37 VisionExecutionAdapter.
     """
 
     def __init__(
@@ -62,6 +61,9 @@ class VisionAgent:
         self.agent_name = agent_name.strip()
         self.model_name = model_name.strip()
         self.provider: VisionModelProvider | None = provider
+        self._execution_adapter: VisionExecutionAdapter | None = (
+            VisionExecutionAdapter(provider=provider) if provider is not None else None
+        )
         self.metadata = dict(metadata or {})
 
     def _prepare_request(
@@ -104,74 +106,65 @@ class VisionAgent:
             f"Expected string or VisionRequest, got {type(request).__name__}."
         )
 
-    def analyze(
+    def execute(
         self,
         request: str | VisionRequest,
-        evidence: list[VisualEvidence] | None = None,
+        evidence: list[Any] | None = None,
         **kwargs: Any,
     ) -> VisionResult:
-        """Execute visual analysis for query and visual evidence.
+        """Primary execution method for VisionAgent utilizing the injected provider.
 
         Args:
             request: Query string or structured VisionRequest.
-            evidence: Optional list of VisualEvidence items.
+            evidence: Optional list of VisualEvidence, citations, search results, or chunks.
             **kwargs: Additional runtime execution parameters.
 
         Returns:
-            Structured VisionResult preserving source lineage and visual analysis.
+            Structured VisionResult containing provider analysis and source lineage.
 
         Raises:
             VisionInputValidationError: If input validation fails.
-            VisionEvidenceError: If visual evidence lineage fails.
-            VisionProcessingError: If visual model inference fails or is not configured.
+            VisionEvidenceError: If visual evidence lineage or formatting fails.
+            VisionProcessingError: If no provider is configured or inference fails.
         """
-        vision_req = self._prepare_request(
-            request, evidence=evidence, metadata=kwargs.get("metadata")
-        )
-
-        # If a concrete provider is configured, delegate execution through the provider contract
-        if self.provider is not None:
-            if not vision_req.has_evidence:
-                return VisionResult(
-                    query=vision_req.query,
-                    status="no_evidence",
-                    description="",
-                    evidence=[],
-                    metadata=dict(vision_req.metadata),
-                )
-
-            primary_ev = vision_req.evidence[0]
-            # Convert raw evidence to PreparedImageEvidence via Day 34 pipeline
-            prepared = prepare_image_evidence(primary_ev)
-            # Build standardized VisionModelInput via Day 35 pipeline
-            model_input = build_vision_input(
-                query=vision_req.query,
-                evidence=prepared,
-                builder_metadata=kwargs.get("builder_metadata"),
-            )
-            # Execute through provider abstraction
-            return self.provider.execute(model_input, **kwargs)
+        if self._execution_adapter is not None:
+            return self._execution_adapter.execute(request, evidence=evidence, **kwargs)
 
         # Default Day 32 behavior when no provider backend is configured:
         # Explicitly signals that model inference backend is not implemented without a provider.
+        # Still performs request validation first to maintain backward compatibility.
+        self._prepare_request(
+            request,
+            evidence=[e for e in (evidence or []) if isinstance(e, VisualEvidence)],
+            metadata=kwargs.get("metadata"),
+        )
         raise VisionProcessingError(
             f"Vision model inference backend for '{self.model_name}' is not implemented for Day 32 foundation."
         )
 
+    def analyze(
+        self,
+        request: str | VisionRequest,
+        evidence: list[Any] | None = None,
+        **kwargs: Any,
+    ) -> VisionResult:
+        """Alias for execute method."""
+        return self.execute(request, evidence=evidence, **kwargs)
+
     def process(
         self,
         request: str | VisionRequest,
-        evidence: list[VisualEvidence] | None = None,
+        evidence: list[Any] | None = None,
         **kwargs: Any,
     ) -> VisionResult:
-        """Alias for analyze method."""
-        return self.analyze(request, evidence=evidence, **kwargs)
+        """Alias for execute method."""
+        return self.execute(request, evidence=evidence, **kwargs)
 
     def __call__(
         self,
         request: str | VisionRequest,
-        evidence: list[VisualEvidence] | None = None,
+        evidence: list[Any] | None = None,
         **kwargs: Any,
     ) -> VisionResult:
         """Allow calling VisionAgent instance directly as a callable."""
-        return self.analyze(request, evidence=evidence, **kwargs)
+        return self.execute(request, evidence=evidence, **kwargs)

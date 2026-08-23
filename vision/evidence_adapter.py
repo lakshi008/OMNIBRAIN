@@ -188,6 +188,11 @@ class VisualEvidenceAdapter:
                 f"Must be one of {sorted(VALID_VISUAL_CONTENT_TYPES)}."
             )
 
+        meta = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+        img_path = image_path if image_path is not None else meta.get("image_path")
+        img_bytes = image_bytes if image_bytes is not None else meta.get("image_bytes")
+        img_fmt = image_format if image_format is not None else meta.get("image_format")
+
         return VisualEvidence(
             document_id=chunk.document_id,
             filename=chunk.filename,
@@ -195,9 +200,9 @@ class VisualEvidenceAdapter:
             page_number=chunk.page_number,
             chunk_index=chunk.chunk_index,
             content_type=chunk.content_type,
-            image_path=image_path,
-            image_bytes=image_bytes,
-            image_format=image_format,
+            image_path=img_path,
+            image_bytes=img_bytes,
+            image_format=img_fmt,
             description=chunk.content,
             metadata=dict(chunk.metadata),
         )
