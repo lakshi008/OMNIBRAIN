@@ -2,7 +2,8 @@
 OmniBrain Member 3 Vision Agent Subsystem.
 
 Provides visual evidence models, image preparation, input building,
-provider abstractions, execution adapters, and contracts for multi-modal reasoning.
+provider abstractions, execution adapters, lifecycle tracking, and contracts
+for multi-modal reasoning.
 """
 
 from vision.evidence_adapter import VisualEvidenceAdapter
@@ -15,6 +16,7 @@ from vision.exceptions import (
     VisionProviderError,
     VisionProviderExecutionError,
     VisionProviderUnavailableError,
+    VisionTimeoutError,
     VisionUnsupportedCapabilityError,
 )
 from vision.execution_adapter import (
@@ -32,6 +34,10 @@ from vision.input_builder import (
     VisionInputBuilder,
     VisionModelInput,
     build_vision_input,
+)
+from vision.lifecycle import (
+    VisionExecutionLifecycle,
+    VisionExecutionStage,
 )
 from vision.models import (
     VALID_VISUAL_CONTENT_TYPES,
@@ -70,8 +76,10 @@ __all__ = [
     "VisionProviderRegistry",
     "VisionProviderConfig",
     "VisionProviderCapabilities",
-    # Execution Adapter (Day 37)
+    # Execution Adapter & Lifecycle (Day 37 & 38)
     "VisionExecutionAdapter",
+    "VisionExecutionStage",
+    "VisionExecutionLifecycle",
     "execute_vision_request",
     # Adapters
     "VisualEvidenceAdapter",
@@ -87,4 +95,5 @@ __all__ = [
     "VisionProviderExecutionError",
     "VisionProviderUnavailableError",
     "VisionUnsupportedCapabilityError",
+    "VisionTimeoutError",
 ]

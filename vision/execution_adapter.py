@@ -3,18 +3,23 @@ Vision Execution Adapter for OmniBrain Member 3 Vision Agent.
 
 Orchestrates the multi-stage pipeline connecting incoming VisionRequest inputs,
 retrieval evidence adaptation (Day 33), image preparation (Day 34),
-input building (Day 35), and provider execution (Day 36) into a unified workflow.
+input building (Day 35), provider execution (Day 36), and execution lifecycle
+hardening (Day 38) into a unified, safe, and deterministic workflow.
 
 Execution Pipeline:
     VisionRequest
           ↓
+    Validating (VisionExecutionStage.VALIDATING)
+          ↓
     Evidence Adaptation (VisualEvidenceAdapter)
           ↓
-    Image Preparation (PreparedImageEvidence)
+    Preparing (VisionExecutionStage.PREPARING)
           ↓
-    Input Building (VisionModelInput)
+    Building Input (VisionExecutionStage.BUILDING_INPUT)
           ↓
-    Provider Execution (VisionModelProvider.execute)
+    Executing (VisionExecutionStage.EXECUTING) -> Immutability & Timeout Boundary
+          ↓
+    Completed / Failed / Timeout (VisionExecutionStage.COMPLETED)
           ↓
     Standardized Result (VisionResult)
 """
@@ -25,14 +30,17 @@ from typing import Any
 
 from vision.evidence_adapter import VisualEvidenceAdapter
 from vision.exceptions import (
+    VisionAgentError,
     VisionEvidenceError,
     VisionInputValidationError,
     VisionProcessingError,
     VisionProviderError,
     VisionProviderExecutionError,
+    VisionTimeoutError,
 )
 from vision.image_preparation import PreparedImageEvidence, prepare_image_evidence
 from vision.input_builder import VisionModelInput, build_vision_input
+from vision.lifecycle import VisionExecutionLifecycle, VisionExecutionStage
 from vision.models import VisionRequest, VisionResult, VisualEvidence
 from vision.provider import VisionModelProvider
 
@@ -40,13 +48,15 @@ from vision.provider import VisionModelProvider
 class VisionExecutionAdapter:
     """Orchestrator between VisionAgent requests and VisionModelProvider backends.
 
-    Encapsulates the complete transformation and validation lifecycle:
-    1. Input request normalization and validation.
+    Encapsulates the complete transformation, validation, and lifecycle hardening:
+    1. Input request normalization and stage validation.
     2. Evidence normalization and adaptation via VisualEvidenceAdapter.
     3. Image inspection, format validation, and preparation via Day 34 pipeline.
     4. VisionModelInput construction and lineage locking via Day 35 pipeline.
-    5. Delegated execution to an injected VisionModelProvider via Day 36 contract.
-    6. Return of structured VisionResult without vendor-specific leakage.
+    5. Input immutability snapshot verification (before and after execution).
+    6. Delegated single-invocation execution to an injected VisionModelProvider via Day 36 contract.
+    7. Execution lifecycle tracking (pending -> validating -> preparing -> building_input -> executing -> completed/failed/timeout).
+    8. Cause-preserving error propagation and metadata attachment without secrets or fake timing.
     """
 
     def __init__(
@@ -132,13 +142,34 @@ class VisionExecutionAdapter:
                 )
         return adapted
 
+    @staticmethod
+    def _create_input_snapshot(model_input: VisionModelInput) -> dict[str, Any]:
+        """Create a field snapshot of VisionModelInput to verify post-execution immutability."""
+        return {
+            "query": model_input.query,
+            "document_id": model_input.document_id,
+            "filename": model_input.filename,
+            "page_number": model_input.page_number,
+            "chunk_id": model_input.chunk_id,
+            "chunk_index": model_input.chunk_index,
+            "content_type": model_input.content_type,
+            "image_format": model_input.image_format,
+            "width": model_input.width,
+            "height": model_input.height,
+            "mode": model_input.mode,
+            "size_bytes": model_input.size_bytes,
+            "is_oversized": model_input.is_oversized,
+            "evidence_metadata": dict(model_input.evidence_metadata),
+            "builder_metadata": dict(model_input.builder_metadata),
+        }
+
     def execute(
         self,
         request: str | VisionRequest,
         evidence: list[Any] | None = None,
         **kwargs: Any,
     ) -> VisionResult:
-        """Execute the multi-stage vision reasoning pipeline.
+        """Execute the multi-stage vision reasoning pipeline with lifecycle state hardening.
 
         Args:
             request: Query string or structured VisionRequest.
@@ -152,44 +183,91 @@ class VisionExecutionAdapter:
             VisionInputValidationError: If request format or parameters are invalid.
             VisionEvidenceError: If visual evidence lineage or preparation fails.
             VisionProviderExecutionError: If provider execution fails.
-            VisionProviderError: If provider contract or capabilities are violated.
+            VisionTimeoutError: If execution exceeds provider timeout limits.
+            VisionProcessingError: If input immutability or result contract is violated.
         """
-        # Step 1: Normalize and validate request and evidence
-        vision_req = self._normalize_request(
-            request, evidence=evidence, metadata=kwargs.get("metadata")
+        lifecycle = VisionExecutionLifecycle(
+            provider_name=self._provider.provider_name,
+            model_name=self._provider.model_name,
         )
 
-        # Step 2: Handle no-evidence requests gracefully
-        if not vision_req.has_evidence:
-            return VisionResult(
+        try:
+            # Stage 1: VALIDATING — Normalize and validate request and evidence
+            lifecycle.transition_to(VisionExecutionStage.VALIDATING)
+            vision_req = self._normalize_request(
+                request, evidence=evidence, metadata=kwargs.get("metadata")
+            )
+
+            # Stage 2: Handle no-evidence requests gracefully
+            if not vision_req.has_evidence:
+                lifecycle.transition_to(
+                    VisionExecutionStage.COMPLETED,
+                    metadata={"notice": "no_evidence_supplied"},
+                )
+                res_meta = dict(vision_req.metadata)
+                res_meta["execution_lifecycle"] = lifecycle.to_dict()
+                return VisionResult(
+                    query=vision_req.query,
+                    status="no_evidence",
+                    description="",
+                    evidence=[],
+                    metadata=res_meta,
+                )
+
+            # Stage 3: PREPARING — Prepare visual evidence via Day 34 pipeline
+            lifecycle.transition_to(VisionExecutionStage.PREPARING)
+            primary_ev = vision_req.evidence[0]
+            prepared_evidence = prepare_image_evidence(primary_ev)
+
+            # Stage 4: BUILDING_INPUT — Construct validated, lineage-locked VisionModelInput via Day 35 pipeline
+            lifecycle.transition_to(VisionExecutionStage.BUILDING_INPUT)
+            model_input = build_vision_input(
                 query=vision_req.query,
-                status="no_evidence",
-                description="",
-                evidence=[],
-                metadata=dict(vision_req.metadata),
+                evidence=prepared_evidence,
+                builder_metadata=kwargs.get("builder_metadata"),
             )
 
-        # Step 3: Prepare visual evidence via Day 34 pipeline
-        primary_ev = vision_req.evidence[0]
-        prepared_evidence = prepare_image_evidence(primary_ev)
+            # Stage 5: EXECUTING — Verify immutability & execute single provider invocation
+            lifecycle.transition_to(VisionExecutionStage.EXECUTING)
+            before_snapshot = self._create_input_snapshot(model_input)
 
-        # Step 4: Construct validated, lineage-locked VisionModelInput via Day 35 pipeline
-        model_input = build_vision_input(
-            query=vision_req.query,
-            evidence=prepared_evidence,
-            builder_metadata=kwargs.get("builder_metadata"),
-        )
+            result = self._provider.execute(model_input, **kwargs)
 
-        # Step 5: Execute provider backend via Day 36 abstraction
-        result = self._provider.execute(model_input, **kwargs)
+            after_snapshot = self._create_input_snapshot(model_input)
+            if before_snapshot != after_snapshot:
+                raise VisionProcessingError(
+                    "VisionModelInput immutability violated during provider execution."
+                )
 
-        # Step 6: Validate result contract
-        if not isinstance(result, VisionResult):
-            raise VisionProcessingError(
-                f"Provider returned unexpected result type: {type(result).__name__}, expected VisionResult."
-            )
+            # Stage 6: Validate result contract
+            if not isinstance(result, VisionResult):
+                raise VisionProcessingError(
+                    f"Provider returned unexpected result type: {type(result).__name__}, expected VisionResult."
+                )
 
-        return result
+            # Stage 7: COMPLETED — Mark lifecycle complete and attach execution metadata
+            lifecycle.transition_to(VisionExecutionStage.COMPLETED)
+            res_meta = dict(result.metadata)
+            res_meta["execution_lifecycle"] = lifecycle.to_dict()
+            result.metadata = res_meta
+
+            return result
+
+        except VisionTimeoutError as err:
+            lifecycle.transition_to(VisionExecutionStage.TIMEOUT, error=str(err))
+            raise VisionTimeoutError(f"Vision provider execution timed out: {err}") from err
+
+        except (VisionInputValidationError, VisionEvidenceError, VisionProviderError, VisionProcessingError) as err:
+            if not lifecycle.is_terminal:
+                lifecycle.transition_to(VisionExecutionStage.FAILED, error=str(err))
+            raise
+
+        except Exception as err:
+            if not lifecycle.is_terminal:
+                lifecycle.transition_to(VisionExecutionStage.FAILED, error=str(err))
+            raise VisionProviderExecutionError(
+                f"Unexpected failure during provider execution lifecycle: {err}"
+            ) from err
 
 
 # ---------------------------------------------------------------------------

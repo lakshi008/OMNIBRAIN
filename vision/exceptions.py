@@ -3,7 +3,7 @@ Exceptions for OmniBrain Member 3 Vision Agent subsystem.
 
 Defines the domain exception hierarchy for visual evidence validation,
 request formatting, lineage integrity, vision processing workflows,
-and vision model provider abstraction.
+vision model provider abstraction, and execution lifecycle/timeout boundaries.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ class VisionProcessingError(VisionAgentError):
 
 
 # ---------------------------------------------------------------------------
-# Provider-specific exception hierarchy (Day 36)
+# Provider-specific exception hierarchy (Day 36 & Day 38)
 # ---------------------------------------------------------------------------
 
 
@@ -75,4 +75,11 @@ class VisionUnsupportedCapabilityError(VisionProviderError, VisionProcessingErro
     """Raised when a vision input requires a capability not supported by the provider."""
 
     def __init__(self, message: str = "Requested capability is not supported by vision provider.") -> None:
+        super().__init__(message)
+
+
+class VisionTimeoutError(VisionProviderError, VisionProcessingError):
+    """Raised when vision provider execution exceeds the configured timeout threshold."""
+
+    def __init__(self, message: str = "Vision provider execution timed out.") -> None:
         super().__init__(message)
