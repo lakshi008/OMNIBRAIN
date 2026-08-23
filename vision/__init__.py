@@ -19,6 +19,11 @@ from vision.image_preparation import (
     PreparedImageEvidence,
     prepare_image_evidence,
 )
+from vision.input_builder import (
+    VisionInputBuilder,
+    VisionModelInput,
+    build_vision_input,
+)
 from vision.models import (
     VALID_VISUAL_CONTENT_TYPES,
     VisionRequest,
@@ -39,6 +44,10 @@ __all__ = [
     "OversizedImagePolicy",
     "SUPPORTED_IMAGE_FORMATS",
     "prepare_image_evidence",
+    # Vision Input Builder (Day 35)
+    "VisionModelInput",
+    "VisionInputBuilder",
+    "build_vision_input",
     # Adapters
     "VisualEvidenceAdapter",
     # Agents
