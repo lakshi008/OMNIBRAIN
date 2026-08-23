@@ -37,6 +37,7 @@ from vision.input_builder import (
 )
 from vision.lifecycle import (
     VisionExecutionLifecycle,
+    VisionExecutionObservation,
     VisionExecutionStage,
 )
 from vision.models import (
@@ -89,6 +90,7 @@ __all__ = [
     "VisionExecutionAdapter",
     "VisionExecutionStage",
     "VisionExecutionLifecycle",
+    "VisionExecutionObservation",
     "execute_vision_request",
     # Result Normalizer & Execution Trace (Day 39)
     "VisionResultNormalizer",
