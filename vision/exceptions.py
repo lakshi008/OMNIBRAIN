@@ -17,6 +17,10 @@ class VisionAgentError(Exception):
         self.message = message
 
 
+# Canonical alias for VisionAgentError
+VisionError = VisionAgentError
+
+
 class VisionInputValidationError(VisionAgentError):
     """Raised when query, visual evidence, or parameters fail validation."""
 

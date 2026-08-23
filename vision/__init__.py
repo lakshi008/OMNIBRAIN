@@ -10,6 +10,7 @@ from vision.evidence_adapter import VisualEvidenceAdapter
 from vision.exceptions import (
     VisionAgentError,
     VisionCancellationError,
+    VisionError,
     VisionEvidenceError,
     VisionInputValidationError,
     VisionProcessingError,
@@ -110,6 +111,7 @@ __all__ = [
     "VisionAgent",
     # Domain Exceptions
     "VisionAgentError",
+    "VisionError",
     "VisionCancellationError",
     "VisionInputValidationError",
     "VisionEvidenceError",
