@@ -12,6 +12,13 @@ from vision.exceptions import (
     VisionInputValidationError,
     VisionProcessingError,
 )
+from vision.image_preparation import (
+    SUPPORTED_IMAGE_FORMATS,
+    ImageEvidencePreparator,
+    OversizedImagePolicy,
+    PreparedImageEvidence,
+    prepare_image_evidence,
+)
 from vision.models import (
     VALID_VISUAL_CONTENT_TYPES,
     VisionRequest,
@@ -26,6 +33,12 @@ __all__ = [
     "VisionRequest",
     "VisionResult",
     "VALID_VISUAL_CONTENT_TYPES",
+    # Image Preparation (Day 34)
+    "PreparedImageEvidence",
+    "ImageEvidencePreparator",
+    "OversizedImagePolicy",
+    "SUPPORTED_IMAGE_FORMATS",
+    "prepare_image_evidence",
     # Adapters
     "VisualEvidenceAdapter",
     # Agents
@@ -36,3 +49,4 @@ __all__ = [
     "VisionEvidenceError",
     "VisionProcessingError",
 ]
+
