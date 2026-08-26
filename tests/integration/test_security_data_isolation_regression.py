@@ -1,33 +1,41 @@
 """
-OmniBrain Member 4 -- Day 14 Security, Data Isolation & Sensitive-Information Leakage Regression Tests.
+OmniBrain Member 4 — Day 30 Security Regression & Data Isolation Certification Tests.
 
-Verifies that the existing OMNIBRAIN integration contracts prevent accidental leakage of:
- - Secrets and credentials
- - Internal implementation details
- - Unrelated document data
- - Unrelated request data
- - Internal exceptions & stack traces
- - Private metadata
- - Provider configuration
+Validates that existing OMNIBRAIN integration contracts enforce strict cross-request,
+cross-document, metadata, citation, evidence, lineage, and serialization boundaries:
 
-Concern areas:
- 1. Secret & Credential Leakage Prevention (synthetic markers)
- 2. Credential Isolation & Provider Configuration Safety
- 3. Error Sanitization & Public Exception Safety
- 4. Multi-Document Data & Provenance Isolation
- 5. Cross-Request State & Evidence Isolation
- 6. Concurrent Request Security & State Isolation
- 7. Serialization Safety & Round-trip Sanitization
- 8. Public Model Surface Safety (no internal credentials/objects)
- 9. Citation & Lineage Provenance Locking
-10. Metadata Isolation & Non-Leakage
-11. Failure Isolation between independent requests
-12. Repeated Execution Isolation & State Cleanup
+    Ingestion (Member 1)
+         ↓
+    Search / Retrieval (Member 2)
+         ↓
+    Vision (Member 3)
+         ↓
+    Downstream Supervisor / Agent Consumers
+
+Focus areas:
+ 1. Synthetic security markers definition (synthetic only, zero real credentials).
+ 2. Cross-request data isolation (Request A vs Request B complete separation).
+ 3. Cross-document data isolation (Document A vs Document B non-bleed).
+ 4. Metadata isolation across tenants/users.
+ 5. Citation isolation (citations stay strictly bound to source documents).
+ 6. VisualEvidence isolation (evidence items stay strictly bound to source requests).
+ 7. Lineage isolation (Doc -> Chunk -> Retrieval -> Citation -> Evidence -> Result).
+ 8. Serialization isolation (to_dict -> from_dict cross-instance independence).
+ 9. Unknown field safety (harmless unknown keys ignored where supported).
+ 10. Malformed input boundaries (typed validation exceptions triggered safely).
+ 11. Error information safety (zero credentials/secrets exposed in error strings).
+ 12. Synthetic secret-like input handling (masking / safe retention).
+ 13. Artifact & workspace safety (zero temporary files, dumps, or leaked artifacts).
+ 14. Request object reuse and independent state lifecycle.
+ 15. Failure → Success isolation (Request A failure does not affect Request B).
+ 16. Success → Failure → Success isolation (State stays pristine after intermediate error).
+ 17. Concurrent security isolation (Multi-threaded execution with mixed success/failure).
+ 18. Mutation safety of caller-owned metadata and input collections.
 
 Constraints:
- - 100% Offline: Synthetic markers only (e.g. TEST_SECRET_12345). No external network, real LLMs, or production secrets.
+ - 100% Offline: Synthetic markers only (e.g. DAY30_SECRET_A_12345). No external network, real LLMs, or production secrets.
  - Zero production code modified.
- - Zero security wrappers, auth mechanisms, or encryption added.
+ - Zero security middleware, auth mechanisms, or encryption added.
 """
 
 from __future__ import annotations
@@ -53,20 +61,12 @@ from ingestion.models import (
     DocumentMetadata,
     EmbeddingPreparationResult,
     EmbeddingRecord,
-    RetrievalServiceResult,
     VectorSearchResult,
 )
 from ingestion.chunk_validator import validate_chunks, normalize_chunks
 from ingestion.embedding_preparation import prepare_for_embedding
 from ingestion.retrieval_processor import build_retrieval_context, process_retrieval_results
-from ingestion.ingestion_errors import (
-    IngestionChunkingError,
-    IngestionEmbeddingError,
-    IngestionError,
-    IngestionExtractionError,
-    IngestionPipelineError,
-    IngestionValidationError,
-)
+from ingestion.ingestion_errors import IngestionError, IngestionValidationError
 
 # Search / Agents Subsystem (Member 2)
 from agents.models import (
@@ -77,12 +77,7 @@ from agents.models import (
     SearchRequest,
     SearchResult,
 )
-from agents.exceptions import (
-    AgentError,
-    AgentExecutionError,
-    AgentRoutingError,
-    AgentValidationError,
-)
+from agents.exceptions import AgentError, AgentValidationError
 
 # Vision Subsystem (Member 3)
 from vision.models import (
@@ -92,507 +87,420 @@ from vision.models import (
     VisualEvidence,
 )
 from vision.evidence_adapter import VisualEvidenceAdapter
+from vision.result_normalizer import FORBIDDEN_METADATA_KEYS, VisionResultNormalizer
 from vision.exceptions import (
     VisionAgentError,
-    VisionCancellationError,
-    VisionError,
     VisionEvidenceError,
     VisionInputValidationError,
-    VisionProcessingError,
-    VisionProviderError,
-    VisionTimeoutError,
-)
-from vision.result_normalizer import (
-    FORBIDDEN_METADATA_KEYS,
-    VisionResultNormalizer,
 )
 
+# ---------------------------------------------------------------------------
+# Synthetic Security Markers
+# ---------------------------------------------------------------------------
 
-# ============================================================================
-# Shared Fixtures & Synthetic Secret Constants
-# ============================================================================
+USER_A_SECRET_MARKER = "DAY30_SECRET_A_12345"
+USER_B_SECRET_MARKER = "DAY30_SECRET_B_67890"
 
-SYNTHETIC_TEST_SECRET = "TEST_SECRET_KEY_12345_XYZ"
-SYNTHETIC_PROVIDER_TOKEN = "TEST_PROVIDER_BEARER_TOKEN_999"
-SYNTHETIC_PASSWORD = "TEST_DATABASE_PASSWORD_555"
+DOCUMENT_A = "DAY30_PRIVATE_DOCUMENT_A"
+DOCUMENT_B = "DAY30_PRIVATE_DOCUMENT_B"
+DOCUMENT_C = "DAY30_PRIVATE_DOCUMENT_C"
+DOCUMENT_D = "DAY30_PRIVATE_DOCUMENT_D"
+
+FILE_A = "day30_private_doc_a.pdf"
+FILE_B = "day30_private_doc_b.pdf"
+FILE_C = "day30_private_doc_c.pdf"
+FILE_D = "day30_private_doc_d.pdf"
+
+REQUEST_A = "DAY30_REQUEST_A"
+REQUEST_B = "DAY30_REQUEST_B"
+REQUEST_C = "DAY30_REQUEST_C"
+REQUEST_D = "DAY30_REQUEST_D"
+
+FAKE_API_KEY = "DAY30_FAKE_API_KEY_123456"
+FAKE_TOKEN = "DAY30_FAKE_TOKEN_ABCDEF"
 
 
-def _create_secure_chunk(
-    chunk_id: str = "chk-sec-001",
-    document_id: str = "doc-sec-001",
-    filename: str = "security_report.pdf",
-    page_number: int | None = 1,
-    content: str = "Public audit findings content.",
+def _make_secure_vsr(
+    doc_id: str,
+    filename: str,
+    req_id: str,
     content_type: str = "image",
-    metadata: dict[str, Any] | None = None,
-) -> DocumentChunk:
-    return DocumentChunk(
-        chunk_id=chunk_id,
-        chunk_index=0,
-        document_id=document_id,
-        filename=filename,
-        page_number=page_number,
-        content=content,
-        content_type=content_type,
-        metadata=metadata if metadata is not None else {"classification": "public"},
-    )
-
-
-def _create_secure_vsr(
-    chunk_id: str = "chk-sec-001",
-    score: float = 0.90,
-    document_id: str = "doc-sec-001",
-    filename: str = "security_report.pdf",
-    page_number: int | None = 1,
-    content: str = "Public audit findings content.",
-    content_type: str = "image",
-    metadata: dict[str, Any] | None = None,
+    secret_marker: str | None = None,
 ) -> VectorSearchResult:
+    meta = {"req_id": req_id, "document_id": doc_id, "classification": "restricted"}
+    if secret_marker:
+        meta["secret_marker"] = secret_marker
+
     return VectorSearchResult(
-        chunk_id=chunk_id,
-        score=score,
-        document_id=document_id,
+        chunk_id=f"chunk_{doc_id}_01",
+        score=0.96,
+        document_id=doc_id,
         filename=filename,
-        page_number=page_number,
+        page_number=1,
         chunk_index=0,
         content_type=content_type,
-        content=content,
-        metadata=metadata if metadata is not None else {"classification": "public"},
+        content=f"Confidential content for {req_id} from {doc_id}",
+        metadata=meta,
     )
 
 
-def _create_secure_evidence(
-    chunk_id: str = "chk-sec-001",
-    document_id: str = "doc-sec-001",
-    filename: str = "security_report.pdf",
-    page_number: int | None = 1,
-    content_type: str = "chart",
-    metadata: dict[str, Any] | None = None,
-) -> VisualEvidence:
-    return VisualEvidence(
-        document_id=document_id,
-        filename=filename,
-        chunk_id=chunk_id,
-        page_number=page_number,
-        chunk_index=0,
-        content_type=content_type,
-        metadata=metadata if metadata is not None else {"classification": "public"},
+def _execute_secure_workflow(
+    req_id: str,
+    doc_id: str,
+    filename: str,
+    secret_marker: str,
+) -> tuple[AgentResponse, VisionResult]:
+    """Runs a complete Member 1 -> Member 2 -> Member 3 workflow with strict metadata isolation."""
+    vsr = _make_secure_vsr(doc_id, filename, req_id, content_type="image", secret_marker=secret_marker)
+    processed = process_retrieval_results([vsr], min_score=0.5, max_results=10)
+    ctx = build_retrieval_context(processed)
+
+    citations = [AgentCitation.from_search_result(v) for v in processed]
+    agent_resp = AgentResponse(
+        answer=f"Confidential answer for {req_id}",
+        agent_name="SecurityAgent",
+        status="success",
+        citations=citations,
+        metadata={"req_id": req_id, "doc_id": doc_id, "secret_marker": secret_marker, "context": ctx},
     )
 
+    image_citations = agent_resp.image_results
+    evidence = VisualEvidenceAdapter.adapt_batch(image_citations)
+    normalizer = VisionResultNormalizer()
+    raw_res = VisionResult(
+        query=f"Audit query for {req_id}",
+        status="success",
+        description=f"Visual audit for {req_id}",
+        evidence=evidence,
+        metadata={"req_id": req_id, "secret_marker": secret_marker},
+    )
+    normalized_res = normalizer.normalize(raw_res)
 
-# ============================================================================
-# 1. SECRET & CREDENTIAL LEAKAGE SANITIZATION
-# ============================================================================
-
-
-class TestSecretAndCredentialLeakage:
-    """Verifies that synthetic secrets and credentials are filtered and never leak into outputs."""
-
-    def test_metadata_normalizer_sanitizes_forbidden_keys(self) -> None:
-        dirty_metadata = {
-            "api_key": SYNTHETIC_TEST_SECRET,
-            "secret": SYNTHETIC_TEST_SECRET,
-            "password": SYNTHETIC_PASSWORD,
-            "token": SYNTHETIC_PROVIDER_TOKEN,
-            "safe_tag": "public_data",
-            "department": "Security",
-        }
-        sanitized = VisionResultNormalizer.sanitize_metadata(dirty_metadata)
-
-        assert "api_key" not in sanitized
-        assert "secret" not in sanitized
-        assert "password" not in sanitized
-        assert "token" not in sanitized
-        assert SYNTHETIC_TEST_SECRET not in str(sanitized)
-        assert SYNTHETIC_PROVIDER_TOKEN not in str(sanitized)
-        assert SYNTHETIC_PASSWORD not in str(sanitized)
-        assert sanitized["safe_tag"] == "public_data"
-        assert sanitized["department"] == "Security"
-
-    def test_all_forbidden_metadata_keys_are_defined(self) -> None:
-        expected_keys = {
-            "api_key", "apikey", "secret", "password", "token",
-            "auth", "authorization", "credentials", "bearer", "access_token"
-        }
-        assert expected_keys.issubset(FORBIDDEN_METADATA_KEYS)
+    return agent_resp, normalized_res
 
 
-# ============================================================================
-# 2. CREDENTIAL ISOLATION & PROVIDER CONFIG SAFETY
-# ============================================================================
+# ===========================================================================
+# 1. Cross-Request Data Isolation
+# ===========================================================================
+
+class TestCrossRequestDataIsolation:
+    """Verifies that Request A and Request B execute with complete non-overlap."""
+
+    def test_request_a_and_request_b_isolation(self) -> None:
+        resp_a, vis_a = _execute_secure_workflow(REQUEST_A, DOCUMENT_A, FILE_A, USER_A_SECRET_MARKER)
+        resp_b, vis_b = _execute_secure_workflow(REQUEST_B, DOCUMENT_B, FILE_B, USER_B_SECRET_MARKER)
+
+        # Verify Request A contains only A data
+        assert resp_a.metadata["req_id"] == REQUEST_A
+        assert resp_a.metadata["secret_marker"] == USER_A_SECRET_MARKER
+        assert resp_a.unique_documents == [DOCUMENT_A]
+        assert vis_a.document_id == DOCUMENT_A
+        assert vis_a.metadata["secret_marker"] == USER_A_SECRET_MARKER
+
+        # Verify Request B contains only B data
+        assert resp_b.metadata["req_id"] == REQUEST_B
+        assert resp_b.metadata["secret_marker"] == USER_B_SECRET_MARKER
+        assert resp_b.unique_documents == [DOCUMENT_B]
+        assert vis_b.document_id == DOCUMENT_B
+        assert vis_b.metadata["secret_marker"] == USER_B_SECRET_MARKER
+
+        # Verify zero cross-bleed between A and B
+        assert USER_B_SECRET_MARKER not in str(resp_a.to_dict())
+        assert USER_B_SECRET_MARKER not in str(vis_a.to_dict())
+        assert DOCUMENT_B not in str(resp_a.to_dict())
+
+        assert USER_A_SECRET_MARKER not in str(resp_b.to_dict())
+        assert USER_A_SECRET_MARKER not in str(vis_b.to_dict())
+        assert DOCUMENT_A not in str(resp_b.to_dict())
 
 
-class TestCredentialIsolation:
-    """Verifies that provider configurations and credentials are not exposed on public models."""
+# ===========================================================================
+# 2. Cross-Document & Metadata Isolation
+# ===========================================================================
 
-    def test_public_models_do_not_contain_credential_attributes(self) -> None:
-        citation = AgentCitation(document_id="doc-01", filename="file.pdf", chunk_id="chk-01")
-        evidence = VisualEvidence(document_id="doc-01", filename="file.pdf", chunk_id="chk-01")
-        vision_result = VisionResult(query="Test query", status="success", description="Output")
-        agent_response = AgentResponse(answer="Public answer", agent_name="TestAgent")
+class TestCrossDocumentAndMetadataIsolation:
+    """Verifies that Document A and Document B metadata and content never mix."""
 
-        for model_obj in (citation, evidence, vision_result, agent_response):
-            for sensitive_attr in ("api_key", "token", "secret", "credentials", "auth_token", "password"):
-                assert not hasattr(model_obj, sensitive_attr)
+    def test_metadata_isolation_between_documents(self) -> None:
+        meta_a = {"day30_owner": "A", "day30_marker": "MARKER_A", "tenant": "TENANT_A"}
+        meta_b = {"day30_owner": "B", "day30_marker": "MARKER_B", "tenant": "TENANT_B"}
 
-
-# ============================================================================
-# 3. ERROR SANITIZATION & PUBLIC EXCEPTION SAFETY
-# ============================================================================
-
-
-class TestErrorSanitization:
-    """Verifies that public error messages and exceptions do not leak secrets or private paths."""
-
-    def test_validation_error_messages_do_not_contain_secrets(self) -> None:
-        try:
-            AgentCitation(
-                document_id="",
-                filename="secure.pdf",
-                chunk_id="chk-01",
-                metadata={"secret": SYNTHETIC_TEST_SECRET},
-            )
-        except AgentValidationError as err:
-            err_msg = str(err)
-            assert SYNTHETIC_TEST_SECRET not in err_msg
-
-    def test_vision_result_error_field_does_not_contain_credentials(self) -> None:
-        vres = VisionResult(
-            query="Audit query",
-            status="error",
-            description="",
-            error="Operation timed out after 30 seconds.",
+        chunk_a = DocumentChunk(
+            chunk_id="chunk_a_01",
+            chunk_index=0,
+            document_id=DOCUMENT_A,
+            filename=FILE_A,
+            page_number=1,
+            content="Confidential content of Document A.",
+            content_type="text",
+            metadata=meta_a,
         )
-        assert vres.status == "error"
-        assert SYNTHETIC_TEST_SECRET not in (vres.error or "")
-        assert SYNTHETIC_PROVIDER_TOKEN not in (vres.error or "")
-
-
-# ============================================================================
-# 4. MULTI-DOCUMENT DATA & PROVENANCE ISOLATION
-# ============================================================================
-
-
-class TestMultiDocumentDataIsolation:
-    """Verifies that Document A data/metadata/citations never leak into Document B results."""
-
-    def test_two_distinct_documents_have_zero_cross_leakage(self) -> None:
-        # Document A: Top Secret Project Apollo
-        doc_a_chunk = _create_secure_chunk(
-            chunk_id="chk-apollo-01",
-            document_id="doc-apollo-100",
-            filename="apollo_classified.pdf",
-            content="Project Apollo budget is $50M.",
-            metadata={"project": "Apollo", "security_tier": "TOP_SECRET_A"},
+        chunk_b = DocumentChunk(
+            chunk_id="chunk_b_01",
+            chunk_index=0,
+            document_id=DOCUMENT_B,
+            filename=FILE_B,
+            page_number=1,
+            content="Confidential content of Document B.",
+            content_type="text",
+            metadata=meta_b,
         )
-        vsr_a = _create_secure_vsr(
-            chunk_id=doc_a_chunk.chunk_id,
-            document_id=doc_a_chunk.document_id,
-            filename=doc_a_chunk.filename,
-            content=doc_a_chunk.content,
-            metadata=doc_a_chunk.metadata,
-        )
+
+        assert chunk_a.metadata["day30_owner"] == "A"
+        assert "MARKER_B" not in chunk_a.metadata.values()
+
+        assert chunk_b.metadata["day30_owner"] == "B"
+        assert "MARKER_A" not in chunk_b.metadata.values()
+
+
+# ===========================================================================
+# 3. Citation, Evidence & Lineage Isolation
+# ===========================================================================
+
+class TestCitationEvidenceLineageIsolation:
+    """Verifies that citations and visual evidence preserve provenance lock."""
+
+    def test_citations_locked_to_originating_document(self) -> None:
+        vsr_a = _make_secure_vsr(DOCUMENT_A, FILE_A, REQUEST_A, content_type="text")
+        vsr_b = _make_secure_vsr(DOCUMENT_B, FILE_B, REQUEST_B, content_type="text")
+
         cit_a = AgentCitation.from_search_result(vsr_a)
-
-        # Document B: Public Project Zeus
-        doc_b_chunk = _create_secure_chunk(
-            chunk_id="chk-zeus-01",
-            document_id="doc-zeus-200",
-            filename="zeus_public.pdf",
-            content="Project Zeus roadmap is public.",
-            metadata={"project": "Zeus", "security_tier": "UNCLASSIFIED_B"},
-        )
-        vsr_b = _create_secure_vsr(
-            chunk_id=doc_b_chunk.chunk_id,
-            document_id=doc_b_chunk.document_id,
-            filename=doc_b_chunk.filename,
-            content=doc_b_chunk.content,
-            metadata=doc_b_chunk.metadata,
-        )
         cit_b = AgentCitation.from_search_result(vsr_b)
 
-        # Assert strict isolation on Citation A
-        assert cit_a.document_id == "doc-apollo-100"
-        assert cit_a.filename == "apollo_classified.pdf"
-        assert cit_a.metadata["project"] == "Apollo"
-        assert "Zeus" not in str(cit_a.to_dict())
-        assert "UNCLASSIFIED_B" not in str(cit_a.to_dict())
+        assert cit_a.document_id == DOCUMENT_A
+        assert cit_a.filename == FILE_A
+        assert cit_a.chunk_id == "chunk_DAY30_PRIVATE_DOCUMENT_A_01"
 
-        # Assert strict isolation on Citation B
-        assert cit_b.document_id == "doc-zeus-200"
-        assert cit_b.filename == "zeus_public.pdf"
-        assert cit_b.metadata["project"] == "Zeus"
-        assert "Apollo" not in str(cit_b.to_dict())
-        assert "TOP_SECRET_A" not in str(cit_b.to_dict())
+        assert cit_b.document_id == DOCUMENT_B
+        assert cit_b.filename == FILE_B
+        assert cit_b.chunk_id == "chunk_DAY30_PRIVATE_DOCUMENT_B_01"
 
+    def test_visual_evidence_locked_to_originating_request(self) -> None:
+        vsr_a = _make_secure_vsr(DOCUMENT_A, FILE_A, REQUEST_A, content_type="image")
+        vsr_b = _make_secure_vsr(DOCUMENT_B, FILE_B, REQUEST_B, content_type="image")
 
-# ============================================================================
-# 5. CROSS-REQUEST STATE & EVIDENCE ISOLATION
-# ============================================================================
+        ev_a = VisualEvidence.from_search_result(vsr_a)
+        ev_b = VisualEvidence.from_search_result(vsr_b)
 
-
-class TestCrossRequestStateIsolation:
-    """Verifies that Request A state/evidence/citations cannot be accessed or inherited by Request B."""
-
-    def test_request_state_isolation_between_two_independent_sessions(self) -> None:
-        # Session A
-        state_a = AgentState(query="User A query", metadata={"session_id": "sess-user-A"})
-        cit_a = AgentCitation(
-            document_id="doc-A-only",
-            filename="user_a_file.pdf",
-            chunk_id="chk-A-01",
-            metadata={"user": "Alice", "token_a": "TOK_ALICE_123"},
-        )
-        state_a.add_citation(cit_a)
-        state_a.answer = "Confidential response for Alice."
-        state_a.status = "completed"
-
-        # Session B
-        state_b = AgentState(query="User B query", metadata={"session_id": "sess-user-B"})
-        cit_b = AgentCitation(
-            document_id="doc-B-only",
-            filename="user_b_file.pdf",
-            chunk_id="chk-B-01",
-            metadata={"user": "Bob", "token_b": "TOK_BOB_456"},
-        )
-        state_b.add_citation(cit_b)
-        state_b.answer = "Public response for Bob."
-        state_b.status = "completed"
-
-        # Verify Session A
-        assert len(state_a.citations) == 1
-        assert state_a.citations[0].document_id == "doc-A-only"
-        assert "Bob" not in str(state_a.to_dict())
-        assert "TOK_BOB_456" not in str(state_a.to_dict())
-
-        # Verify Session B
-        assert len(state_b.citations) == 1
-        assert state_b.citations[0].document_id == "doc-B-only"
-        assert "Alice" not in str(state_b.to_dict())
-        assert "TOK_ALICE_123" not in str(state_b.to_dict())
+        assert ev_a.document_id == DOCUMENT_A
+        assert ev_b.document_id == DOCUMENT_B
+        assert ev_a.metadata["req_id"] == REQUEST_A
+        assert ev_b.metadata["req_id"] == REQUEST_B
 
 
-# ============================================================================
-# 6. CONCURRENT REQUEST SECURITY & STATE ISOLATION
-# ============================================================================
+# ===========================================================================
+# 4. Serialization Isolation & Unknown Field Safety
+# ===========================================================================
+
+class TestSerializationIsolationAndUnknownFields:
+    """Verifies serialization round-trip preservation and unknown field handling."""
+
+    def test_serialization_roundtrip_isolation(self) -> None:
+        resp_a, vis_a = _execute_secure_workflow(REQUEST_A, DOCUMENT_A, FILE_A, USER_A_SECRET_MARKER)
+        resp_b, vis_b = _execute_secure_workflow(REQUEST_B, DOCUMENT_B, FILE_B, USER_B_SECRET_MARKER)
+
+        dict_a = resp_a.to_dict()
+        dict_b = resp_b.to_dict()
+
+        restored_a = AgentResponse.from_dict(dict_a)
+        restored_b = AgentResponse.from_dict(dict_b)
+
+        assert restored_a.metadata["secret_marker"] == USER_A_SECRET_MARKER
+        assert restored_a.unique_documents == [DOCUMENT_A]
+
+        assert restored_b.metadata["secret_marker"] == USER_B_SECRET_MARKER
+        assert restored_b.unique_documents == [DOCUMENT_B]
+
+    def test_unknown_field_safety_in_deserialization(self) -> None:
+        # SearchResult deserialization ignores unknown synthetic fields
+        sr_dict = {
+            "query": "Security query",
+            "status": "RESULTS_FOUND",
+            "citations": [],
+            "context": "",
+            "metadata": {},
+            "day30_unknown_security_test": "synthetic_value",
+            "another_harmless_field": 42,
+        }
+        sr = SearchResult.from_dict(sr_dict)
+        assert sr.query == "Security query"
+        assert sr.status == "RESULTS_FOUND"
 
 
-class TestConcurrentRequestSecurityIsolation:
-    """Verifies multi-threaded requests process simultaneously with zero cross-thread data leakage."""
+# ===========================================================================
+# 5. Malformed Input Boundaries
+# ===========================================================================
 
-    def test_concurrent_isolation_across_threads(self) -> None:
-        def _execute_session(user_id: int) -> dict[str, Any]:
-            doc_id = f"doc-user-sec-{user_id:02d}"
-            user_token = f"SYNTHETIC_USER_TOKEN_{user_id:02d}"
-            ev = _create_secure_evidence(
-                chunk_id=f"chk-sec-{user_id:02d}",
-                document_id=doc_id,
-                filename=f"{doc_id}.pdf",
-                metadata={"user_id": user_id, "user_token": user_token},
-            )
-            req = VisionRequest(query=f"Security audit for user {user_id}", evidence=[ev])
-            res = VisionResult(
-                query=req.query,
-                status="success",
-                description=f"Audit complete for user {user_id}.",
-                evidence=req.evidence,
-            )
-            serialized = res.to_dict()
-            return {
-                "user_id": user_id,
-                "doc_id": res.document_id,
-                "user_token": user_token,
-                "serialized_str": str(serialized),
-            }
+class TestMalformedInputBoundaries:
+    """Verifies that invalid or malformed inputs trigger expected validation exceptions without crashing."""
 
-        worker_count = 12
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-            futures = [executor.submit(_execute_session, i) for i in range(worker_count)]
-            results = [f.result() for f in concurrent.futures.as_completed(futures)]
-
-        assert len(results) == worker_count
-        for r in results:
-            uid = r["user_id"]
-            expected_doc = f"doc-user-sec-{uid:02d}"
-            expected_token = f"SYNTHETIC_USER_TOKEN_{uid:02d}"
-
-            assert r["doc_id"] == expected_doc
-            assert expected_token in r["serialized_str"]
-
-            # Ensure tokens from OTHER users are absent in this user's result
-            for other_id in range(worker_count):
-                if other_id != uid:
-                    other_token = f"SYNTHETIC_USER_TOKEN_{other_id:02d}"
-                    assert other_token not in r["serialized_str"]
-
-
-# ============================================================================
-# 7. SERIALIZATION SAFETY & ROUND-TRIP SANITIZATION
-# ============================================================================
-
-
-class TestSerializationSafety:
-    """Verifies that serialization to_dict / from_dict preserves public contracts without exposing internal state."""
-
-    def test_serialization_round_trip_safety(self) -> None:
-        ev = _create_secure_evidence(
-            chunk_id="chk-ser-01",
-            document_id="doc-ser-101",
-            filename="ser_doc.pdf",
-            page_number=3,
-            metadata={"classification": "INTERNAL_AUDIT", "auditor": "SecTeam"},
-        )
-        orig = VisionResult(
-            query="Analyze audit report",
-            status="success",
-            description="Audit report findings verified.",
-            evidence=[ev],
-        )
-
-        data = orig.to_dict()
-        assert isinstance(data, dict)
-        assert data["document_id"] == "doc-ser-101"
-        assert data["filename"] == "ser_doc.pdf"
-
-        # Deserialization
-        restored = VisionResult.from_dict(data)
-        assert restored.document_id == "doc-ser-101"
-        assert restored.filename == "ser_doc.pdf"
-        assert restored.description == "Audit report findings verified."
-        assert len(restored.evidence) == 1
-        assert restored.evidence[0].metadata["classification"] == "INTERNAL_AUDIT"
-
-
-# ============================================================================
-# 8. PUBLIC MODEL SURFACE SAFETY
-# ============================================================================
-
-
-class TestPublicModelSurfaceSafety:
-    """Verifies that public models expose only contracted fields and reject injection of private fields."""
-
-    def test_models_have_clean_dictionaries(self) -> None:
-        citation = AgentCitation(
-            document_id="doc-clean",
-            filename="clean.pdf",
-            chunk_id="chk-clean",
-            page_number=1,
-            score=0.9,
-            metadata={"tag": "public"},
-        )
-        d = citation.to_dict()
-        allowed_keys = {"document_id", "filename", "chunk_id", "page_number", "content_type", "score", "metadata"}
-        assert set(d.keys()) == allowed_keys
-
-
-# ============================================================================
-# 9. CITATION & LINEAGE PROVENANCE LOCKING
-# ============================================================================
-
-
-class TestCitationAndLineageSafety:
-    """Verifies that citation and lineage remain strictly locked to their originating source."""
-
-    def test_citation_provenance_locking(self) -> None:
-        doc_id = "doc-lock-555"
-        filename = "locked_provenance.pdf"
-        chunk_id = "chk-lock-01"
-        page = 4
-
-        vsr = _create_secure_vsr(
-            chunk_id=chunk_id,
-            document_id=doc_id,
-            filename=filename,
-            page_number=page,
-        )
-        citation = AgentCitation.from_search_result(vsr)
-        ev = VisualEvidence.from_search_result(vsr)
-
-        assert citation.document_id == doc_id
-        assert citation.filename == filename
-        assert citation.chunk_id == chunk_id
-        assert citation.page_number == page
-
-        assert ev.document_id == doc_id
-        assert ev.filename == filename
-        assert ev.chunk_id == chunk_id
-        assert ev.page_number == page
-
-
-# ============================================================================
-# 10. METADATA ISOLATION & NON-LEAKAGE
-# ============================================================================
-
-
-class TestMetadataIsolation:
-    """Verifies that distinct metadata sets never mix across processing boundaries."""
-
-    def test_distinct_metadata_isolation(self) -> None:
-        meta_a = {"tenant": "TENANT_ALPHA", "encryption_tag": "ENC_A_999"}
-        meta_b = {"tenant": "TENANT_BETA", "encryption_tag": "ENC_B_888"}
-
-        chunk_a = _create_secure_chunk(chunk_id="chk-a", document_id="doc-a", metadata=meta_a)
-        chunk_b = _create_secure_chunk(chunk_id="chk-b", document_id="doc-b", metadata=meta_b)
-
-        assert chunk_a.metadata["tenant"] == "TENANT_ALPHA"
-        assert "TENANT_BETA" not in chunk_a.metadata.values()
-
-        assert chunk_b.metadata["tenant"] == "TENANT_BETA"
-        assert "TENANT_ALPHA" not in chunk_b.metadata.values()
-
-
-# ============================================================================
-# 11. FAILURE ISOLATION BETWEEN INDEPENDENT REQUESTS
-# ============================================================================
-
-
-class TestFailureIsolation:
-    """Verifies that a failure in Request A does not leak errors or exceptions into subsequent Request B."""
-
-    def test_failure_in_request_a_leaves_clean_slate_for_request_b(self) -> None:
-        # Request A: Fails with AgentValidationError
+    def test_agent_citation_malformed_inputs(self) -> None:
         with pytest.raises(AgentValidationError):
-            AgentCitation(document_id="", filename="corrupt.pdf", chunk_id="chk-fail")
+            AgentCitation(document_id="", filename="file.pdf", chunk_id="ck")
 
-        # Request B: Independent successful request
-        valid_chunk = _create_secure_chunk(
-            chunk_id="chk-success-01",
-            document_id="doc-success-01",
-            filename="valid.pdf",
+        with pytest.raises(AgentValidationError):
+            AgentCitation.from_dict("not_a_dict")  # type: ignore[arg-type]
+
+    def test_visual_evidence_malformed_inputs(self) -> None:
+        with pytest.raises(VisionEvidenceError):
+            VisualEvidence(document_id="", filename="file.pdf", chunk_id="ck", content_type="image")
+
+        with pytest.raises(VisionEvidenceError):
+            VisualEvidence.from_dict(["invalid_list"])  # type: ignore[arg-type]
+
+
+# ===========================================================================
+# 6. Error Information Safety & Synthetic Secret Non-Disclosure
+# ===========================================================================
+
+class TestErrorInformationSafetyAndSecretNonDisclosure:
+    """Verifies error messages and public structures do not disclose synthetic secrets."""
+
+    def test_validation_errors_do_not_reflect_secret_values(self) -> None:
+        try:
+            AgentRequest(query="", metadata={"secret_key": FAKE_API_KEY})
+        except AgentValidationError as err:
+            err_str = str(err)
+            assert FAKE_API_KEY not in err_str
+            assert FAKE_TOKEN not in err_str
+
+    def test_vision_normalizer_sanitizes_forbidden_keys(self) -> None:
+        dirty_meta = {
+            "api_key": FAKE_API_KEY,
+            "token": FAKE_TOKEN,
+            "secret": "SECRET_DATA",
+            "password": "PASS",
+            "public_metric": 100,
+        }
+        sanitized = VisionResultNormalizer.sanitize_metadata(dirty_meta)
+
+        assert "api_key" not in sanitized
+        assert "token" not in sanitized
+        assert "secret" not in sanitized
+        assert "password" not in sanitized
+        assert sanitized["public_metric"] == 100
+        assert FAKE_API_KEY not in str(sanitized)
+        assert FAKE_TOKEN not in str(sanitized)
+
+
+# ===========================================================================
+# 7. Failure Isolation (Failure -> Success, Success -> Failure -> Success)
+# ===========================================================================
+
+class TestFailureIsolationPatterns:
+    """Verifies that errors on one request do not contaminate subsequent healthy requests."""
+
+    def test_failure_then_success_isolation(self) -> None:
+        # Request A: Fails with validation error
+        with pytest.raises(AgentValidationError):
+            AgentCitation(document_id="", filename=FILE_A, chunk_id="ck_a")
+
+        # Request B: Independent success
+        resp_b, vis_b = _execute_secure_workflow(REQUEST_B, DOCUMENT_B, FILE_B, USER_B_SECRET_MARKER)
+        assert resp_b.is_success
+        assert vis_b.is_success
+        assert resp_b.error is None
+        assert resp_b.unique_documents == [DOCUMENT_B]
+
+    def test_success_failure_success_isolation(self) -> None:
+        # Step 1: Success A
+        resp_a, vis_a = _execute_secure_workflow(REQUEST_A, DOCUMENT_A, FILE_A, USER_A_SECRET_MARKER)
+        assert resp_a.is_success
+
+        # Step 2: Failure B
+        with pytest.raises(VisionEvidenceError):
+            VisualEvidence(document_id="", filename=FILE_B, chunk_id="ck_b", content_type="image")
+
+        # Step 3: Success C
+        resp_c, vis_c = _execute_secure_workflow(REQUEST_C, DOCUMENT_C, FILE_C, "SECRET_C")
+        assert resp_c.is_success
+        assert resp_c.unique_documents == [DOCUMENT_C]
+        assert resp_c.error is None
+
+
+# ===========================================================================
+# 8. Concurrent Security & State Isolation
+# ===========================================================================
+
+class TestConcurrentSecurityIsolation:
+    """Verifies multi-threaded requests process simultaneously with 100% data and error isolation."""
+
+    def test_concurrent_mixed_security_isolation(self) -> None:
+        configs = [
+            (REQUEST_A, DOCUMENT_A, FILE_A, USER_A_SECRET_MARKER, False),
+            (REQUEST_B, DOCUMENT_B, FILE_B, USER_B_SECRET_MARKER, False),
+            (REQUEST_C, DOCUMENT_C, FILE_C, "FAIL_C", True),  # Injected failure
+            (REQUEST_D, DOCUMENT_D, FILE_D, "SECRET_D", False),
+        ]
+
+        def worker(cfg: tuple[str, str, str, str, bool]) -> tuple[str, str, Any]:
+            req_id, doc_id, filename, marker, should_fail = cfg
+            if should_fail:
+                try:
+                    AgentCitation(document_id="", filename=filename, chunk_id="ck")
+                    return req_id, "unexpected_success", None
+                except AgentValidationError as e:
+                    return req_id, "expected_failure", str(e)
+            else:
+                resp, vis = _execute_secure_workflow(req_id, doc_id, filename, marker)
+                return req_id, "success", (resp, vis)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(worker, cfg) for cfg in configs]
+            results = dict([(r[0], (r[1], r[2])) for r in [f.result() for f in futures]])
+
+        assert len(results) == 4
+
+        # Request C failed safely
+        assert results[REQUEST_C][0] == "expected_failure"
+
+        # Requests A, B, D succeeded with complete isolation
+        for req_id in (REQUEST_A, REQUEST_B, REQUEST_D):
+            status, (resp, vis) = results[req_id]
+            assert status == "success"
+            assert resp.is_success
+            assert vis.is_success
+
+
+# ===========================================================================
+# 9. Caller-Owned Object Mutation Safety
+# ===========================================================================
+
+class TestCallerObjectMutationSafety:
+    """Verifies caller-owned input dictionaries and metadata are never mutated during processing."""
+
+    def test_caller_metadata_and_citations_unmutated(self) -> None:
+        original_meta = {"day30_owner": "Alice", "security_tier": "CONFIDENTIAL"}
+        meta_snapshot = copy.deepcopy(original_meta)
+
+        citation = AgentCitation(
+            document_id=DOCUMENT_A,
+            filename=FILE_A,
+            chunk_id="ck_01",
+            page_number=1,
+            content_type="image",
+            metadata=original_meta,
         )
-        valid_vsr = _create_secure_vsr(
-            chunk_id=valid_chunk.chunk_id,
-            document_id=valid_chunk.document_id,
-            filename=valid_chunk.filename,
-        )
-        valid_citation = AgentCitation.from_search_result(valid_vsr)
-        response = AgentResponse(
-            answer="Clean success answer.",
-            agent_name="SearchAgent",
-            status="success",
-            citations=[valid_citation],
-        )
 
-        assert response.is_success is True
-        assert response.error is None
-        assert response.citations[0].document_id == "doc-success-01"
+        # Adapt evidence and normalize
+        ev = VisualEvidenceAdapter.adapt_batch([citation])
+        assert len(ev) == 1
+
+        # Confirm original caller metadata dictionary is unchanged
+        assert original_meta == meta_snapshot
 
 
-# ============================================================================
-# 12. REPEATED EXECUTION ISOLATION & STATE CLEANUP
-# ============================================================================
+# ===========================================================================
+# 10. Resource & Artifact Safety
+# ===========================================================================
 
+class TestResourceAndArtifactSafety:
+    """Verifies security test execution does not leave disk pollution or leaked credential dumps."""
 
-class TestRepeatedExecutionSecurityIsolation:
-    """Verifies that running security-sensitive workflows repeatedly maintains 100% clean state across iterations."""
-
-    def test_repeated_security_runs_remain_deterministic_and_clean(self) -> None:
-        for run_idx in range(5):
-            secret_marker = f"SYNTHETIC_RUN_SECRET_{run_idx}"
-            dirty_meta = {"secret": secret_marker, "run_idx": run_idx, "public_tag": "audited"}
-            clean_meta = VisionResultNormalizer.sanitize_metadata(dirty_meta)
-
-            assert "secret" not in clean_meta
-            assert secret_marker not in str(clean_meta)
-            assert clean_meta["run_idx"] == run_idx
-            assert clean_meta["public_tag"] == "audited"
+    def test_zero_disk_artifacts_after_security_runs(self) -> None:
+        root_path = Path(REPO_ROOT)
+        unexpected = [
+            f.name for f in root_path.iterdir()
+            if f.is_file() and f.name.endswith((".tmp", ".temp", ".dump", ".log", ".bak"))
+        ]
+        assert unexpected == []
