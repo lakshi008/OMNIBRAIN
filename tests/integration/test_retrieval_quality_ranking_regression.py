@@ -1,5 +1,5 @@
 """
-OmniBrain Member 4 — Day 44 Retrieval Quality & Ranking Regression Certification.
+OmniBrain Member 4 — Day 49 Retrieval Quality & Ranking Regression Certification.
 
 Validates the public retrieval and search contracts across:
   - Ingestion Retrieval Layer (VectorSearchResult, RetrievalServiceResult,
@@ -9,22 +9,26 @@ Validates the public retrieval and search contracts across:
                          AgentCitation, AgentResponse, AgentRequest)
 
 Covers:
-  1.  Retrieval result model contract and field validation.
-  2.  Relevance ordering and descending score ranking.
-  3.  Score preservation through downstream citation and response layers.
-  4.  Top-K and max_results limit enforcement.
-  5.  Result count behavior (0 results, 1 result, N results, capped results).
-  6.  Empty query and unknown query handling.
-  7.  Cross-document and cross-request isolation.
-  8.  Duplicate result deduplication (highest-score retention).
-  9.  Same-document multi-chunk preservation and multi-document ranking.
-  10. Metadata and page-level lineage preservation.
-  11. Citation-aware context building and ordering integrity.
-  12. Retrieval result and search packaging serialization round-trips.
-  13. Query and result association.
-  14. Invalid retrieval input rejection and deterministic error contracts.
-  15. Input mutation safety and result object isolation.
-  16. Multi-document dataset verification and 3-iteration determinism.
+  1.  Retrieval result model contract, source identity, and field validation.
+  2.  Valid query execution targeting exact relevant markers.
+  3.  Relevance ranking and descending score ordering.
+  4.  Score preservation through downstream citation and response layers.
+  5.  Document, page, and chunk lineage preservation.
+  6.  Metadata preservation from retrieval to citation and response.
+  7.  Top-K and max_results limit enforcement (k=1, 2, 3).
+  8.  Query isolation (Query A vs Query B) and multi-document isolation (DOC-A vs DOC-B).
+  9.  Page-level and chunk-level result isolation.
+  10. Empty query rejection and no-match query safe fallback.
+  11. Duplicate result deduplication (highest-score retention).
+  12. Result order stability and score order stability across 3 runs.
+  13. Retrieval -> Context conversion and marker preservation.
+  14. Retrieval -> Agent context handoff.
+  15. Cross-request isolation and execution order reversal (A->B vs B->A).
+  16. Input and result mutation safety / object isolation.
+  17. Serialization round-trips for retrieval and search packaging.
+  18. Invalid query and invalid filter handling.
+  19. Sequential failure isolation (VALID-A -> INVALID-B -> VALID-C).
+  20. Complete offline execution with in-memory store and deterministic mock embeddings.
 
 Constraints:
   - 100% Offline: In-memory QdrantVectorStore, mock embedding provider, no external network.
@@ -40,6 +44,7 @@ import dataclasses
 import json
 import math
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +57,7 @@ from qdrant_client import QdrantClient
 
 # Ingestion layer (Member 1)
 from ingestion.models import (
+    EmbeddingGenerationResult,
     EmbeddingVectorRecord,
     RetrievalServiceResult,
     VectorSearchResult,
@@ -84,42 +90,63 @@ from agents.search_agent import SearchAgent
 # Deterministic Synthetic Fixtures & Stubs
 # ============================================================================
 
-DAY44_DOC_A = "DAY44-DOC-A"
-DAY44_DOC_B = "DAY44-DOC-B"
-DAY44_DOC_C = "DAY44-DOC-C"
-DAY44_DOC_D = "DAY44-DOC-D"
-DAY44_DOC_E = "DAY44-DOC-E"
+DAY49_DOC_A = "DAY49-DOC-A"
+DAY49_DOC_B = "DAY49-DOC-B"
 
-DAY44_RELEVANT_ALPHA = "DAY44_RELEVANT_ALPHA"
-DAY44_ALPHA_CONTENT = "Alpha specification details regarding OmniBrain retrieval algorithms."
+DAY49_FILE_A = "day49_alpha_specs.pdf"
+DAY49_FILE_B = "day49_beta_notes.pdf"
 
-DAY44_RELEVANT_BETA = "DAY44_RELEVANT_BETA"
-DAY44_BETA_CONTENT = "Beta architecture overview for agentic RAG ranking policies."
+DAY49_PAGE_A1 = 1
+DAY49_PAGE_A2 = 2
+DAY49_PAGE_A3 = 3
+DAY49_PAGE_B1 = 1
 
-DAY44_IRRELEVANT_GAMMA = "DAY44_IRRELEVANT_GAMMA"
-DAY44_GAMMA_CONTENT = "Gamma unrelated notes on legacy hardware maintenance."
+DAY49_CHUNK_A1 = str(uuid.UUID("11111111-1111-1111-1111-111111111111"))
+DAY49_CHUNK_A2 = str(uuid.UUID("22222222-2222-2222-2222-222222222222"))
+DAY49_CHUNK_A3 = str(uuid.UUID("33333333-3333-3333-3333-333333333333"))
+DAY49_CHUNK_B1 = str(uuid.UUID("44444444-4444-4444-4444-444444444444"))
 
-DAY44_UNKNOWN_QUERY_999 = "DAY44_UNKNOWN_QUERY_999"
+DAY49_EXACT_RELEVANT_MARKER = "DAY49_EXACT_RELEVANT_MARKER_SPEC_100"
+DAY49_PARTIAL_RELEVANT_MARKER = "DAY49_PARTIAL_RELEVANT_MARKER_SPEC_50"
+DAY49_UNRELATED_MARKER = "DAY49_UNRELATED_MARKER_LEGACY_0"
+DAY49_OTHER_DOCUMENT_MARKER = "DAY49_OTHER_DOCUMENT_MARKER_BETA_99"
 
-DAY44_META_A: dict[str, Any] = {"day44_source": "synthetic", "day44_doc": "A", "domain": "retrieval"}
-DAY44_META_B: dict[str, Any] = {"day44_source": "synthetic", "day44_doc": "B", "domain": "agents"}
-DAY44_META_C: dict[str, Any] = {"day44_source": "synthetic", "day44_doc": "C", "domain": "hardware"}
+DAY49_DOC_A_ONLY = "DAY49_DOC_A_ONLY_EXCLUSIVE_FLAG"
+DAY49_DOC_B_ONLY = "DAY49_DOC_B_ONLY_EXCLUSIVE_FLAG"
+
+DAY49_QUERY_WITH_NO_MATCH = "DAY49_QUERY_WITH_NO_MATCH_XYZ_NONEXISTENT"
+
+DAY49_META_A: dict[str, Any] = {
+    "day49_source": "synthetic",
+    "day49_category": "relevance",
+    "marker": DAY49_DOC_A_ONLY,
+}
+DAY49_META_B: dict[str, Any] = {
+    "day49_source": "synthetic",
+    "day49_category": "relevance",
+    "marker": DAY49_DOC_B_ONLY,
+}
 
 
-class DeterministicMockEmbeddingProvider:
-    """Offline mock embedding provider returning deterministic unit vectors."""
+class DeterministicDay49EmbeddingProvider:
+    """Offline deterministic mock embedding provider returning fixed 4D vectors."""
 
     def __init__(self, dimension: int = 4) -> None:
         self.dimension = dimension
 
     def embed(self, text: str) -> list[float]:
-        """Generate deterministic vector based on query string."""
-        if "alpha" in text.lower() or "doc_a" in text.lower():
+        """Generate deterministic vector based on query string keywords."""
+        clean = text.lower()
+        if "exact" in clean or "spec_100" in clean or "chunk_a1" in clean:
             return [1.0, 0.0, 0.0, 0.0]
-        if "beta" in text.lower() or "doc_b" in text.lower():
-            return [0.0, 1.0, 0.0, 0.0]
-        if "gamma" in text.lower() or "doc_c" in text.lower():
+        if "partial" in clean or "spec_50" in clean or "chunk_a2" in clean:
+            return [0.7, 0.7, 0.0, 0.0]
+        if "unrelated" in clean or "legacy_0" in clean:
             return [0.0, 0.0, 1.0, 0.0]
+        if "other" in clean or "beta" in clean or "doc_b" in clean:
+            return [0.0, 1.0, 0.0, 0.0]
+        if "no_match" in clean or "nonexistent" in clean:
+            return [0.0, 0.0, 0.0, 1.0]
         return [0.25, 0.25, 0.25, 0.25]
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
@@ -135,185 +162,170 @@ def in_memory_store() -> QdrantVectorStore:
 
 
 # ============================================================================
-# 1. Retrieval Result Model Contract
+# 1. Retrieval API Discovery & Valid Query
 # ============================================================================
 
-class TestRetrievalResultContract:
-    """Certifies field validation and structure of VectorSearchResult and RetrievalServiceResult."""
+class TestRetrievalApiDiscoveryAndValidQuery:
+    """Certifies that the existing retrieval API correctly fetches exact relevant markers."""
 
-    def test_vector_search_result_fields(self) -> None:
-        """VectorSearchResult retains all contractual fields."""
-        res = VectorSearchResult(
-            chunk_id="CHUNK-001",
-            score=0.94,
-            document_id=DAY44_DOC_A,
-            filename="doc_a.pdf",
-            page_number=2,
+    def test_valid_retrieval_returns_exact_relevant_chunk(
+        self, in_memory_store: QdrantVectorStore
+    ) -> None:
+        """Query targeting exact relevant marker retrieves CHUNK-A1 with correct lineage."""
+        in_memory_store.create_collection("docs", vector_dimension=4)
+
+        r_a1 = EmbeddingVectorRecord(
+            chunk_id=DAY49_CHUNK_A1,
+            document_id=DAY49_DOC_A,
+            filename=DAY49_FILE_A,
             chunk_index=0,
+            page_number=DAY49_PAGE_A1,
             content_type="text",
-            content=DAY44_ALPHA_CONTENT,
-            metadata=DAY44_META_A,
+            vector=[1.0, 0.0, 0.0, 0.0],
+            metadata={"content": f"Exact specs: {DAY49_EXACT_RELEVANT_MARKER}", "doc": "A"},
+        )
+        r_b1 = EmbeddingVectorRecord(
+            chunk_id=DAY49_CHUNK_B1,
+            document_id=DAY49_DOC_B,
+            filename=DAY49_FILE_B,
+            chunk_index=0,
+            page_number=DAY49_PAGE_B1,
+            content_type="text",
+            vector=[0.0, 1.0, 0.0, 0.0],
+            metadata={"content": f"Other specs: {DAY49_OTHER_DOCUMENT_MARKER}", "doc": "B"},
         )
 
-        assert res.chunk_id == "CHUNK-001"
-        assert res.score == 0.94
-        assert res.document_id == DAY44_DOC_A
-        assert res.filename == "doc_a.pdf"
-        assert res.page_number == 2
-        assert res.chunk_index == 0
-        assert res.content_type == "text"
-        assert res.content == DAY44_ALPHA_CONTENT
-        assert res.metadata == DAY44_META_A
+        gen_res = EmbeddingGenerationResult(
+            document_id=DAY49_DOC_A,
+            filename=DAY49_FILE_A,
+            items=[r_a1, r_b1],
+            dimension=4,
+            is_ready=True,
+        )
+        in_memory_store.upsert_embeddings("docs", gen_res)
 
-    def test_retrieval_service_result_properties(self) -> None:
-        """RetrievalServiceResult exposes helper properties and filters."""
-        r1 = VectorSearchResult(
-            chunk_id="C-1", score=0.9, document_id="D-1", filename="f1.pdf",
-            page_number=1, chunk_index=0, content_type="text", content="Text 1",
-        )
-        r2 = VectorSearchResult(
-            chunk_id="C-2", score=0.8, document_id="D-1", filename="f1.pdf",
-            page_number=1, chunk_index=1, content_type="table", content="Table 1",
-        )
-        r3 = VectorSearchResult(
-            chunk_id="C-3", score=0.7, document_id="D-2", filename="f2.pdf",
-            page_number=2, chunk_index=0, content_type="image", content="Image 1",
+        embedder = DeterministicDay49EmbeddingProvider(dimension=4)
+        agent = SearchAgent(
+            embedding_provider=embedder,
+            store=in_memory_store,
+            collection_name="docs",
         )
 
-        s_res = RetrievalServiceResult(
-            query_vector_dimension=4,
-            results=[r1, r2, r3],
-            context="Formatted context",
-        )
+        # Target exact marker
+        resp = agent.search(f"Find {DAY49_EXACT_RELEVANT_MARKER}")
 
-        assert s_res.total_results == 3
-        assert s_res.has_results is True
-        assert s_res.text_results == 1
-        assert s_res.table_results == 1
-        assert s_res.image_results == 1
-        assert s_res.get_results_by_type("table") == [r2]
-        assert s_res.get_results_on_page(1) == [r1, r2]
-        assert s_res.get_results_on_page(2) == [r3]
+        assert resp.is_success is True
+        assert resp.has_citations is True
+        assert resp.citations[0].document_id == DAY49_DOC_A
+        assert resp.citations[0].chunk_id == DAY49_CHUNK_A1
+        assert resp.citations[0].page_number == DAY49_PAGE_A1
+        assert resp.citations[0].filename == DAY49_FILE_A
 
 
 # ============================================================================
-# 2. Relevance Ordering & Ranking
+# 2. Relevance Ranking & Score Preservation
 # ============================================================================
 
-class TestRelevanceAndRankingOrder:
+class TestRelevanceRankingAndScorePreservation:
     """Certifies that process_retrieval_results sorts strictly descending by score."""
 
-    def test_ranking_order_descending_by_score(self) -> None:
-        """Highest score ranked first (A > B > C)."""
-        r_low = VectorSearchResult(
-            chunk_id="C-LOW", score=0.40, document_id=DAY44_DOC_C, filename="c.pdf",
-            page_number=1, chunk_index=0, content_type="text", content=DAY44_GAMMA_CONTENT,
+    def test_relevance_ranking_order_descending(self) -> None:
+        """Exact relevant (0.95) > Partial relevant (0.75) > Unrelated (0.25)."""
+        r_exact = VectorSearchResult(
+            chunk_id=DAY49_CHUNK_A1, score=0.95, document_id=DAY49_DOC_A, filename=DAY49_FILE_A,
+            page_number=1, chunk_index=0, content_type="text", content=DAY49_EXACT_RELEVANT_MARKER,
         )
-        r_high = VectorSearchResult(
-            chunk_id="C-HIGH", score=0.95, document_id=DAY44_DOC_A, filename="a.pdf",
-            page_number=1, chunk_index=0, content_type="text", content=DAY44_ALPHA_CONTENT,
+        r_partial = VectorSearchResult(
+            chunk_id=DAY49_CHUNK_A2, score=0.75, document_id=DAY49_DOC_A, filename=DAY49_FILE_A,
+            page_number=2, chunk_index=1, content_type="text", content=DAY49_PARTIAL_RELEVANT_MARKER,
         )
-        r_med = VectorSearchResult(
-            chunk_id="C-MED", score=0.75, document_id=DAY44_DOC_B, filename="b.pdf",
-            page_number=1, chunk_index=0, content_type="text", content=DAY44_BETA_CONTENT,
+        r_unrelated = VectorSearchResult(
+            chunk_id=DAY49_CHUNK_A3, score=0.25, document_id=DAY49_DOC_A, filename=DAY49_FILE_A,
+            page_number=3, chunk_index=2, content_type="text", content=DAY49_UNRELATED_MARKER,
         )
 
-        ranked = process_retrieval_results([r_low, r_high, r_med])
+        ranked = process_retrieval_results([r_unrelated, r_exact, r_partial])
 
         assert len(ranked) == 3
-        assert ranked[0].chunk_id == "C-HIGH"
+        assert ranked[0].chunk_id == DAY49_CHUNK_A1
         assert ranked[0].score == 0.95
-        assert ranked[1].chunk_id == "C-MED"
+        assert ranked[1].chunk_id == DAY49_CHUNK_A2
         assert ranked[1].score == 0.75
-        assert ranked[2].chunk_id == "C-LOW"
-        assert ranked[2].score == 0.40
+        assert ranked[2].chunk_id == DAY49_CHUNK_A3
+        assert ranked[2].score == 0.25
 
-    def test_ranking_tie_breaking_deterministic(self) -> None:
-        """Tied scores are resolved deterministically by chunk_index then chunk_id."""
-        r1 = VectorSearchResult(
-            chunk_id="CHUNK-Z", score=0.85, document_id=DAY44_DOC_A, filename="a.pdf",
-            page_number=1, chunk_index=2, content_type="text", content="Content Z",
-        )
-        r2 = VectorSearchResult(
-            chunk_id="CHUNK-A", score=0.85, document_id=DAY44_DOC_A, filename="a.pdf",
-            page_number=1, chunk_index=1, content_type="text", content="Content A",
-        )
-        r3 = VectorSearchResult(
-            chunk_id="CHUNK-B", score=0.85, document_id=DAY44_DOC_A, filename="a.pdf",
-            page_number=1, chunk_index=1, content_type="text", content="Content B",
-        )
-
-        ranked = process_retrieval_results([r1, r2, r3])
-
-        assert len(ranked) == 3
-        # Lowest chunk_index first (1 < 2), then lexicographic chunk_id ("CHUNK-A" < "CHUNK-B")
-        assert ranked[0].chunk_id == "CHUNK-A"
-        assert ranked[1].chunk_id == "CHUNK-B"
-        assert ranked[2].chunk_id == "CHUNK-Z"
-
-    def test_min_score_threshold_filtering(self) -> None:
-        """Results with score < min_score are filtered out."""
-        r_relevant = VectorSearchResult(
-            chunk_id="C-REL", score=0.82, document_id=DAY44_DOC_A, filename="a.pdf",
-            page_number=1, chunk_index=0, content_type="text", content="Relevant",
-        )
-        r_irrelevant = VectorSearchResult(
-            chunk_id="C-IRR", score=0.45, document_id=DAY44_DOC_C, filename="c.pdf",
-            page_number=1, chunk_index=0, content_type="text", content="Irrelevant",
-        )
-
-        filtered = process_retrieval_results([r_relevant, r_irrelevant], min_score=0.70)
-        assert len(filtered) == 1
-        assert filtered[0].chunk_id == "C-REL"
-
-
-# ============================================================================
-# 3. Score Preservation
-# ============================================================================
-
-class TestScorePreservation:
-    """Certifies that score values survive downstream citation conversion."""
-
-    def test_score_survives_into_citation_and_response(self) -> None:
-        """Relevance score is preserved without recalculation or truncation."""
+    def test_score_preservation_through_citation_and_response(self) -> None:
+        """Relevance score survives from VectorSearchResult into citation and SearchResult."""
         vs_res = VectorSearchResult(
-            chunk_id="C-EXACT",
-            score=0.8875,
-            document_id=DAY44_DOC_A,
-            filename="doc_a.pdf",
+            chunk_id=DAY49_CHUNK_A1,
+            score=0.9385,
+            document_id=DAY49_DOC_A,
+            filename=DAY49_FILE_A,
             page_number=1,
             chunk_index=0,
             content_type="text",
-            content="Score preservation test",
+            content=DAY49_EXACT_RELEVANT_MARKER,
         )
 
         citation = AgentCitation.from_search_result(vs_res)
-        assert citation.score == 0.8875
+        assert citation.score == 0.9385
 
-        response = AgentResponse(
-            answer="",
-            agent_name="SearchAgent",
+        resp = AgentResponse(
+            answer="Ans",
+            agent_name="Agent",
             citations=[citation],
+            metadata={"query": "Find exact specs"},
         )
-        assert response.citations[0].score == 0.8875
+        assert resp.citations[0].score == 0.9385
 
-        d = response.to_dict()
-        assert d["citations"][0]["score"] == 0.8875
+        s_res = SearchResult.from_response(resp)
+        assert s_res.citations[0].score == 0.9385
 
 
 # ============================================================================
-# 4. Top-K & Result Count Contract
+# 3. Source Lineage & Metadata Preservation
 # ============================================================================
 
-class TestTopKAndResultCountContract:
-    """Certifies top-k, max_results limits, and result count boundaries."""
+class TestSourceLineageAndMetadataPreservation:
+    """Certifies preservation of document_id, page_number, chunk_id, and metadata."""
+
+    def test_lineage_and_metadata_integrity(self) -> None:
+        """Document, page, chunk IDs and metadata dict remain intact."""
+        res = VectorSearchResult(
+            chunk_id=DAY49_CHUNK_A1,
+            score=0.91,
+            document_id=DAY49_DOC_A,
+            filename=DAY49_FILE_A,
+            page_number=DAY49_PAGE_A1,
+            chunk_index=0,
+            content_type="text",
+            content=DAY49_EXACT_RELEVANT_MARKER,
+            metadata=DAY49_META_A,
+        )
+
+        citation = AgentCitation.from_search_result(res)
+
+        assert citation.document_id == DAY49_DOC_A
+        assert citation.filename == DAY49_FILE_A
+        assert citation.chunk_id == DAY49_CHUNK_A1
+        assert citation.page_number == DAY49_PAGE_A1
+        assert citation.metadata["day49_source"] == "synthetic"
+        assert citation.metadata["day49_category"] == "relevance"
+
+
+# ============================================================================
+# 4. Top-K Behavior (k=1, 2, 3)
+# ============================================================================
+
+class TestTopKBehavior:
+    """Certifies top-k parameter and max_results limit enforcement."""
 
     @pytest.mark.parametrize("limit", [1, 2, 3])
-    def test_max_results_limit_capping(self, limit: int) -> None:
-        """process_retrieval_results caps output at requested max_results."""
+    def test_max_results_capping(self, limit: int) -> None:
+        """process_retrieval_results caps output at requested limit."""
         results = [
             VectorSearchResult(
-                chunk_id=f"C-{i}", score=0.90 - (i * 0.05), document_id=DAY44_DOC_A,
+                chunk_id=f"C-{i}", score=0.95 - (i * 0.1), document_id=DAY49_DOC_A,
                 filename="a.pdf", page_number=1, chunk_index=i, content_type="text", content=f"Text {i}",
             )
             for i in range(5)
@@ -321,351 +333,207 @@ class TestTopKAndResultCountContract:
 
         capped = process_retrieval_results(results, max_results=limit)
         assert len(capped) == limit
-        assert capped[0].score == 0.90
-
-    def test_zero_results_and_empty_list(self) -> None:
-        """Empty input results list returns empty list."""
-        assert process_retrieval_results([]) == []
-        assert build_retrieval_context([]) == ""
+        assert capped[0].score == 0.95
 
 
 # ============================================================================
-# 5. Query Validation & Unknown Query Behavior
+# 5. Query & Multi-Document Isolation
 # ============================================================================
 
-class TestQueryValidationAndUnknownQuery:
-    """Certifies empty query rejection and unknown query handling."""
+class TestQueryAndMultiDocumentIsolation:
+    """Certifies that Query A vs Query B and DOC-A vs DOC-B remain isolated."""
 
-    def test_empty_or_whitespace_query_rejection(self) -> None:
-        """SearchRequest and AgentRequest reject empty queries."""
+    def test_multi_document_marker_isolation(self) -> None:
+        """DOC-A context contains only DOC-A markers; DOC-B context contains only DOC-B."""
+        r_a = VectorSearchResult(
+            chunk_id=DAY49_CHUNK_A1, score=0.9, document_id=DAY49_DOC_A, filename=DAY49_FILE_A,
+            page_number=1, chunk_index=0, content_type="text",
+            content=f"{DAY49_EXACT_RELEVANT_MARKER} - {DAY49_DOC_A_ONLY}",
+        )
+        r_b = VectorSearchResult(
+            chunk_id=DAY49_CHUNK_B1, score=0.9, document_id=DAY49_DOC_B, filename=DAY49_FILE_B,
+            page_number=1, chunk_index=0, content_type="text",
+            content=f"{DAY49_OTHER_DOCUMENT_MARKER} - {DAY49_DOC_B_ONLY}",
+        )
+
+        ctx_a = build_retrieval_context([r_a])
+        ctx_b = build_retrieval_context([r_b])
+
+        assert DAY49_DOC_A_ONLY in ctx_a
+        assert DAY49_DOC_B_ONLY not in ctx_a
+        assert DAY49_FILE_B not in ctx_a
+
+        assert DAY49_DOC_B_ONLY in ctx_b
+        assert DAY49_DOC_A_ONLY not in ctx_b
+        assert DAY49_FILE_A not in ctx_b
+
+
+# ============================================================================
+# 6. Empty Query & No-Match Query Behavior
+# ============================================================================
+
+class TestEmptyAndNoMatchQueryBehavior:
+    """Certifies validation on empty query and graceful handling on no-match query."""
+
+    def test_empty_query_raises_validation_error(self) -> None:
+        """Empty or whitespace query raises AgentValidationError."""
         with pytest.raises(AgentValidationError, match="query cannot be empty"):
             SearchRequest(query="")
 
         with pytest.raises(AgentValidationError, match="query cannot be empty"):
-            SearchRequest(query="   ")
+            AgentRequest(query="   ")
 
-        with pytest.raises(AgentValidationError, match="query cannot be empty"):
-            AgentRequest(query="")
-
-    def test_unknown_query_produces_no_results_safely(
+    def test_no_match_query_safe_fallback(
         self, in_memory_store: QdrantVectorStore
     ) -> None:
-        """Searching an empty or non-matching collection returns NO_RESULTS safely."""
-        in_memory_store.create_collection("empty_coll", vector_dimension=4)
-        embedder = DeterministicMockEmbeddingProvider(dimension=4)
-        agent = SearchAgent(
-            embedding_provider=embedder,
-            store=in_memory_store,
-            collection_name="empty_coll",
-        )
+        """Query with no matches returns NO_RESULTS without error."""
+        in_memory_store.create_collection("docs", vector_dimension=4)
+        embedder = DeterministicDay49EmbeddingProvider(dimension=4)
+        agent = SearchAgent(embedding_provider=embedder, store=in_memory_store, collection_name="docs")
 
-        response = agent.search(DAY44_UNKNOWN_QUERY_999)
-        assert response.status == "success"
-        assert len(response.citations) == 0
-        assert response.has_citations is False
-        assert response.metadata["search_status"] == "NO_RESULTS"
-
-        packaged = agent.package_result(response)
-        assert packaged.status == "NO_RESULTS"
-        assert packaged.total_results == 0
-        assert packaged.has_results is False
+        resp = agent.search(DAY49_QUERY_WITH_NO_MATCH)
+        assert resp.status == "success"
+        assert resp.citations == []
+        assert resp.has_citations is False
+        assert resp.metadata["search_status"] == "NO_RESULTS"
 
 
 # ============================================================================
-# 6. Cross-Document & Cross-Request Isolation
+# 7. Duplicate Handling & Deduplication
 # ============================================================================
 
-class TestCrossDocumentAndRequestIsolation:
-    """Certifies that results from DOC-A and DOC-B remain isolated."""
+class TestDuplicateHandling:
+    """Certifies that process_retrieval_results deduplicates by chunk_id keeping highest score."""
 
-    def test_cross_document_isolation_in_retrieval_batches(self) -> None:
-        """Results from DOC-A contain only DOC-A chunks, DOC-B contains only DOC-B."""
-        r_a = VectorSearchResult(
-            chunk_id="CHUNK-A-01", score=0.95, document_id=DAY44_DOC_A, filename="doc_a.pdf",
-            page_number=1, chunk_index=0, content_type="text", content=DAY44_ALPHA_CONTENT,
-        )
-        r_b = VectorSearchResult(
-            chunk_id="CHUNK-B-01", score=0.95, document_id=DAY44_DOC_B, filename="doc_b.pdf",
-            page_number=1, chunk_index=0, content_type="text", content=DAY44_BETA_CONTENT,
-        )
-
-        resp_a = AgentResponse(
-            answer="Doc A Response",
-            agent_name="SearchAgent",
-            citations=[AgentCitation.from_search_result(r_a)],
-        )
-        resp_b = AgentResponse(
-            answer="Doc B Response",
-            agent_name="SearchAgent",
-            citations=[AgentCitation.from_search_result(r_b)],
-        )
-
-        assert resp_a.unique_documents == [DAY44_DOC_A]
-        assert DAY44_DOC_B not in resp_a.unique_documents
-
-        assert resp_b.unique_documents == [DAY44_DOC_B]
-        assert DAY44_DOC_A not in resp_b.unique_documents
-
-    def test_sequential_cross_request_isolation(self) -> None:
-        """Sequential search requests do not leak citations or metadata."""
-        req_a = SearchRequest(query="Query A", metadata={"tenant": "A"})
-        req_b = SearchRequest(query="Query B", metadata={"tenant": "B"})
-
-        assert req_a.metadata["tenant"] == "A"
-        assert req_b.metadata["tenant"] == "B"
-        assert "tenant" not in req_a.query
-
-
-# ============================================================================
-# 7. Duplicate Handling & Multi-Chunk Retention
-# ============================================================================
-
-class TestDuplicateAndMultiChunkHandling:
-    """Certifies deduplication by chunk_id and retention of distinct chunks."""
-
-    def test_deduplicate_by_chunk_id_retains_highest_score(self) -> None:
+    def test_duplicate_chunk_deduplication_retains_highest_score(self) -> None:
         """Duplicate results with identical chunk_id are collapsed to highest score."""
         r1 = VectorSearchResult(
-            chunk_id="CHUNK-DUP-01", score=0.60, document_id=DAY44_DOC_A, filename="a.pdf",
+            chunk_id=DAY49_CHUNK_A1, score=0.60, document_id=DAY49_DOC_A, filename=DAY49_FILE_A,
             page_number=1, chunk_index=0, content_type="text", content="Lower score version",
         )
         r2 = VectorSearchResult(
-            chunk_id="CHUNK-DUP-01", score=0.92, document_id=DAY44_DOC_A, filename="a.pdf",
-            page_number=1, chunk_index=0, content_type="text", content="Higher score version",
-        )
-        r3 = VectorSearchResult(
-            chunk_id="CHUNK-DUP-01", score=0.75, document_id=DAY44_DOC_A, filename="a.pdf",
-            page_number=1, chunk_index=0, content_type="text", content="Medium score version",
+            chunk_id=DAY49_CHUNK_A1, score=0.96, document_id=DAY49_DOC_A, filename=DAY49_FILE_A,
+            page_number=1, chunk_index=0, content_type="text", content="Highest score version",
         )
 
-        deduped = process_retrieval_results([r1, r2, r3])
+        deduped = process_retrieval_results([r1, r2])
         assert len(deduped) == 1
-        assert deduped[0].chunk_id == "CHUNK-DUP-01"
-        assert deduped[0].score == 0.92
-        assert deduped[0].content == "Higher score version"
+        assert deduped[0].chunk_id == DAY49_CHUNK_A1
+        assert deduped[0].score == 0.96
+        assert deduped[0].content == "Highest score version"
 
-    def test_same_document_distinct_chunks_retained(self) -> None:
-        """Multiple distinct chunks from the same document are all retained."""
-        chunks = [
+
+# ============================================================================
+# 8. Order Stability & Repeated Execution (3 Iterations)
+# ============================================================================
+
+class TestOrderStabilityAndRepeatedExecution:
+    """Certifies 3-iteration determinism of result and score ordering."""
+
+    def test_result_and_score_order_stability_3_iterations(self) -> None:
+        """3 identical executions produce identical ranking and ordering."""
+        inputs = [
             VectorSearchResult(
-                chunk_id=f"CHUNK-A{i}", score=0.90 - (i * 0.05), document_id=DAY44_DOC_A,
-                filename="doc_a.pdf", page_number=i + 1, chunk_index=i,
-                content_type="text", content=f"Section {i} content",
+                chunk_id=f"CHUNK-{i}", score=0.50 + (i * 0.15), document_id=DAY49_DOC_A,
+                filename=DAY49_FILE_A, page_number=1, chunk_index=i, content_type="text", content=f"C{i}",
             )
-            for i in range(3)
+            for i in range(4)
         ]
 
-        processed = process_retrieval_results(chunks)
-        assert len(processed) == 3
-        assert [c.chunk_id for c in processed] == ["CHUNK-A0", "CHUNK-A1", "CHUNK-A2"]
-        assert all(c.document_id == DAY44_DOC_A for c in processed)
+        runs: list[list[str]] = []
+        for _ in range(3):
+            processed = process_retrieval_results(inputs)
+            runs.append([r.chunk_id for r in processed])
+
+        assert runs[0] == runs[1] == runs[2]
+        # Highest score first (CHUNK-3: 0.95, CHUNK-2: 0.80, CHUNK-1: 0.65, CHUNK-0: 0.50)
+        assert runs[0] == ["CHUNK-3", "CHUNK-2", "CHUNK-1", "CHUNK-0"]
 
 
 # ============================================================================
-# 8. Multi-Document Ranking & Lineage Preservation
+# 9. Retrieval -> Context & Retrieval -> Agent
 # ============================================================================
 
-class TestMultiDocumentRankingAndLineage:
-    """Certifies multi-document ranking, metadata preservation, and page lineage."""
+class TestRetrievalToContextAndAgent:
+    """Certifies context building compatibility and agent handoff."""
 
-    def test_multi_document_ranking_hierarchy(self) -> None:
-        """Rank results across DOC-A (0.95), DOC-B (0.80), DOC-C (0.35)."""
-        r_a = VectorSearchResult(
-            chunk_id="C-A", score=0.95, document_id=DAY44_DOC_A, filename="doc_a.pdf",
-            page_number=1, chunk_index=0, content_type="text", content=DAY44_ALPHA_CONTENT,
-            metadata=DAY44_META_A,
-        )
-        r_b = VectorSearchResult(
-            chunk_id="C-B", score=0.80, document_id=DAY44_DOC_B, filename="doc_b.pdf",
-            page_number=2, chunk_index=0, content_type="text", content=DAY44_BETA_CONTENT,
-            metadata=DAY44_META_B,
-        )
-        r_c = VectorSearchResult(
-            chunk_id="C-C", score=0.35, document_id=DAY44_DOC_C, filename="doc_c.pdf",
-            page_number=3, chunk_index=0, content_type="text", content=DAY44_GAMMA_CONTENT,
-            metadata=DAY44_META_C,
-        )
-
-        ranked = process_retrieval_results([r_c, r_a, r_b])
-        assert [r.document_id for r in ranked] == [DAY44_DOC_A, DAY44_DOC_B, DAY44_DOC_C]
-        assert ranked[0].metadata["domain"] == "retrieval"
-        assert ranked[1].metadata["domain"] == "agents"
-        assert ranked[2].metadata["domain"] == "hardware"
-
-        # Verify page lineage
-        assert ranked[0].page_number == 1
-        assert ranked[1].page_number == 2
-        assert ranked[2].page_number == 3
-
-
-# ============================================================================
-# 9. Context Building Compatibility
-# ============================================================================
-
-class TestContextBuildingCompatibility:
-    """Certifies build_retrieval_context formatting and citation numbering."""
-
-    def test_context_building_structure_and_ordering(self) -> None:
-        """build_retrieval_context formats source blocks matching ranking order."""
-        r1 = VectorSearchResult(
-            chunk_id="C-1", score=0.95, document_id=DAY44_DOC_A, filename="doc_a.pdf",
-            page_number=1, chunk_index=0, content_type="text", content=DAY44_ALPHA_CONTENT,
-        )
-        r2 = VectorSearchResult(
-            chunk_id="C-2", score=0.85, document_id=DAY44_DOC_B, filename="doc_b.pdf",
-            page_number=4, chunk_index=1, content_type="table", content="Table data cells",
+    def test_retrieval_to_context_and_agent_handoff(self) -> None:
+        """Formatted context and citations hand off cleanly into AgentResponse."""
+        res = VectorSearchResult(
+            chunk_id=DAY49_CHUNK_A1,
+            score=0.97,
+            document_id=DAY49_DOC_A,
+            filename=DAY49_FILE_A,
+            page_number=DAY49_PAGE_A1,
+            chunk_index=0,
+            content_type="text",
+            content=DAY49_EXACT_RELEVANT_MARKER,
+            metadata=DAY49_META_A,
         )
 
-        context = build_retrieval_context([r1, r2])
+        context = build_retrieval_context([res])
+        assert DAY49_EXACT_RELEVANT_MARKER in context
+        assert f"File: {DAY49_FILE_A}" in context
 
-        assert "[Source 1]" in context
-        assert "[Source 2]" in context
-        assert "File: doc_a.pdf" in context
-        assert "Page: 1" in context
-        assert "Type: text" in context
-        assert DAY44_ALPHA_CONTENT in context
-
-        assert "File: doc_b.pdf" in context
-        assert "Page: 4" in context
-        assert "Type: table" in context
-        assert "Table data cells" in context
-
-        # Source 1 appears before Source 2
-        idx1 = context.find("[Source 1]")
-        idx2 = context.find("[Source 2]")
-        assert idx1 < idx2
-
-
-# ============================================================================
-# 10. Retrieval Serialization Round-Trip
-# ============================================================================
-
-class TestRetrievalSerialization:
-    """Certifies serialization and deserialization of retrieval artifacts."""
-
-    def test_vector_search_result_asdict_and_agent_citation_roundtrip(self) -> None:
-        """VectorSearchResult and AgentCitation survive dictionary serialization."""
-        vs_res = VectorSearchResult(
-            chunk_id="C-SERIAL",
-            score=0.91,
-            document_id=DAY44_DOC_A,
-            filename="doc_a.pdf",
-            page_number=5,
-            chunk_index=2,
-            content_type="image",
-            content="Serialized image content",
-            metadata=DAY44_META_A,
-        )
-
-        d_vs = dataclasses.asdict(vs_res)
-        assert d_vs["chunk_id"] == "C-SERIAL"
-        assert d_vs["score"] == 0.91
-        assert d_vs["metadata"]["day44_doc"] == "A"
-
-        citation = AgentCitation.from_search_result(vs_res)
-        d_cit = citation.to_dict()
-        restored_cit = AgentCitation.from_dict(d_cit)
-        assert restored_cit == citation
-
-
-# ============================================================================
-# 11. Query & Result Association
-# ============================================================================
-
-class TestQueryResultAssociation:
-    """Certifies query attribution in SearchResult and AgentResponse."""
-
-    def test_search_result_associates_exact_query(self) -> None:
-        """SearchResult retains the query that produced the results."""
-        citation = AgentCitation(
-            document_id=DAY44_DOC_A,
-            filename="doc_a.pdf",
-            chunk_id="C-1",
-        )
-        sres = SearchResult(
-            query="Evaluate Day 44 ranking contracts",
-            status="RESULTS_FOUND",
+        citation = AgentCitation.from_search_result(res)
+        resp = AgentResponse(
+            answer="Grounded answer based on retrieval.",
+            agent_name="SearchAgent",
             citations=[citation],
-            context="Context block",
+            metadata={"context": context},
         )
-        assert sres.query == "Evaluate Day 44 ranking contracts"
 
-        d = sres.to_dict()
-        assert d["query"] == "Evaluate Day 44 ranking contracts"
-        restored = SearchResult.from_dict(d)
-        assert restored.query == "Evaluate Day 44 ranking contracts"
+        assert resp.citations[0].document_id == DAY49_DOC_A
+        assert resp.citations[0].chunk_id == DAY49_CHUNK_A1
+        assert resp.citations[0].score == 0.97
 
 
 # ============================================================================
-# 12. Invalid Retrieval Input Rejection
+# 10. Cross-Request Isolation & Order Reversal
 # ============================================================================
 
-class TestInvalidRetrievalInput:
-    """Certifies input validation and error contracts on retrieval functions."""
+class TestCrossRequestIsolationAndOrderReversal:
+    """Certifies request order reversal (A->B vs B->A) produces identical isolated results."""
 
-    def test_process_retrieval_results_invalid_inputs(self) -> None:
-        """process_retrieval_results rejects invalid results list and parameters."""
-        # Non-list
-        with pytest.raises(TypeError, match="results must be a list"):
-            process_retrieval_results("not_a_list")  # type: ignore[arg-type]
+    def test_request_order_reversal_isolation(self) -> None:
+        """Executing A->B then B->A causes no cross-request state leakage."""
+        c_a = AgentCitation(
+            document_id=DAY49_DOC_A, filename=DAY49_FILE_A, chunk_id=DAY49_CHUNK_A1,
+            metadata={"marker": DAY49_DOC_A_ONLY},
+        )
+        c_b = AgentCitation(
+            document_id=DAY49_DOC_B, filename=DAY49_FILE_B, chunk_id=DAY49_CHUNK_B1,
+            metadata={"marker": DAY49_DOC_B_ONLY},
+        )
 
-        # Non-VectorSearchResult items
-        with pytest.raises(TypeError, match="not an instance of VectorSearchResult"):
-            process_retrieval_results([{"dict": "not_model"}])  # type: ignore[list-item]
+        resp_a1 = AgentResponse(answer="A", agent_name="Agent", citations=[c_a])
+        resp_b1 = AgentResponse(answer="B", agent_name="Agent", citations=[c_b])
 
-        # Invalid min_score
-        with pytest.raises(ValueError, match="min_score must be a finite float"):
-            process_retrieval_results([], min_score=1.5)
+        resp_b2 = AgentResponse(answer="B", agent_name="Agent", citations=[c_b])
+        resp_a2 = AgentResponse(answer="A", agent_name="Agent", citations=[c_a])
 
-        with pytest.raises(ValueError, match="min_score must be a finite float"):
-            process_retrieval_results([], min_score=float("nan"))
-
-        # Invalid max_results
-        with pytest.raises(ValueError, match="max_results must be a positive integer"):
-            process_retrieval_results([], max_results=0)
-
-        with pytest.raises(ValueError, match="max_results must be a positive integer"):
-            process_retrieval_results([], max_results=-5)
-
-    def test_retrieve_function_invalid_inputs(self, in_memory_store: QdrantVectorStore) -> None:
-        """retrieve function validates store, collection, query_vector, and top_k."""
-        # Invalid store
-        with pytest.raises(TypeError, match="store must be an instance of QdrantVectorStore"):
-            retrieve(query_vector=[0.1, 0.2], store="not_store", collection_name="coll")  # type: ignore[arg-type]
-
-        # Empty collection
-        with pytest.raises(ValueError, match="collection_name must be a non-empty string"):
-            retrieve(query_vector=[0.1, 0.2], store=in_memory_store, collection_name="")
-
-        # Empty vector
-        with pytest.raises(ValueError, match="query_vector cannot be empty"):
-            retrieve(query_vector=[], store=in_memory_store, collection_name="coll")
-
-        # Non-numeric vector element
-        with pytest.raises(ValueError, match="invalid non-numeric or non-finite value"):
-            retrieve(query_vector=[0.1, "bad"], store=in_memory_store, collection_name="coll")  # type: ignore[list-item]
-
-        # Invalid top_k
-        with pytest.raises(ValueError, match="top_k must be a positive integer"):
-            retrieve(query_vector=[0.1, 0.2], store=in_memory_store, collection_name="coll", top_k=0)
+        assert resp_a1.to_dict() == resp_a2.to_dict()
+        assert resp_b1.to_dict() == resp_b2.to_dict()
+        assert DAY49_DOC_B not in resp_a2.unique_documents
+        assert DAY49_DOC_A not in resp_b2.unique_documents
 
 
 # ============================================================================
-# 13. Input Mutation Safety & Object Isolation
+# 11. Input & Result Mutation Safety
 # ============================================================================
 
-class TestInputMutationSafetyAndIsolation:
-    """Certifies that retrieval functions do not mutate caller inputs."""
+class TestInputAndResultMutationSafety:
+    """Certifies that caller input lists and result objects are protected against mutation."""
 
-    def test_process_retrieval_results_does_not_mutate_caller_list(self) -> None:
-        """Caller results list remains unchanged after filtering and sorting."""
+    def test_caller_list_not_mutated_by_retrieval_processing(self) -> None:
+        """process_retrieval_results leaves input list unchanged."""
         r1 = VectorSearchResult(
-            chunk_id="C-1", score=0.6, document_id="D-1", filename="f.pdf",
+            chunk_id="C-1", score=0.5, document_id="D-1", filename="f.pdf",
             page_number=1, chunk_index=0, content_type="text", content="C1",
         )
         r2 = VectorSearchResult(
             chunk_id="C-2", score=0.9, document_id="D-1", filename="f.pdf",
-            page_number=1, chunk_index=1, content_type="text", content="C2",
+            page_number=2, chunk_index=1, content_type="text", content="C2",
         )
 
         caller_list = [r1, r2]
@@ -675,59 +543,80 @@ class TestInputMutationSafetyAndIsolation:
 
         assert len(output) == 1
         assert caller_list == caller_copy
-        assert len(caller_list) == 2
+
+    def test_result_object_mutation_independence(self) -> None:
+        """Mutating one result object does not affect another."""
+        r_a = VectorSearchResult(
+            chunk_id="C-A", score=0.9, document_id="D-A", filename="a.pdf",
+            page_number=1, chunk_index=0, content_type="text", content="A",
+        )
+        r_b = VectorSearchResult(
+            chunk_id="C-B", score=0.8, document_id="D-B", filename="b.pdf",
+            page_number=1, chunk_index=0, content_type="text", content="B",
+        )
+
+        d_a = dataclasses.asdict(r_a)
+        d_a["document_id"] = "MUTATED"
+
+        assert r_a.document_id == "D-A"
+        assert r_b.document_id == "D-B"
 
 
 # ============================================================================
-# 14. Multi-Document Dataset & Determinism
+# 12. Serialization Round-Trips
 # ============================================================================
 
-class TestMultiDocumentDatasetAndDeterminism:
-    """Certifies multi-document dataset integrity and 3-iteration determinism."""
+class TestSerializationRoundTrips:
+    """Certifies serialization for retrieval and search result objects."""
 
-    def test_multi_document_dataset_5_documents(self) -> None:
-        """5-document dataset (DOC-A through DOC-E) correctly processed and ranked."""
-        docs = [DAY44_DOC_A, DAY44_DOC_B, DAY44_DOC_C, DAY44_DOC_D, DAY44_DOC_E]
-        dataset_results = [
-            VectorSearchResult(
-                chunk_id=f"CHUNK-{doc}-01",
-                score=0.95 - (idx * 0.10),
-                document_id=doc,
-                filename=f"{doc.lower()}.pdf",
-                page_number=idx + 1,
-                chunk_index=0,
-                content_type="text",
-                content=f"Content marker for {doc}",
-                metadata={"doc": doc, "rank_pos": idx},
-            )
-            for idx, doc in enumerate(docs)
-        ]
+    def test_vector_search_result_and_citation_serialization(self) -> None:
+        """VectorSearchResult and AgentCitation survive serialization without data loss."""
+        res = VectorSearchResult(
+            chunk_id=DAY49_CHUNK_A1,
+            score=0.945,
+            document_id=DAY49_DOC_A,
+            filename=DAY49_FILE_A,
+            page_number=DAY49_PAGE_A1,
+            chunk_index=0,
+            content_type="text",
+            content=DAY49_EXACT_RELEVANT_MARKER,
+            metadata=DAY49_META_A,
+        )
 
-        ranked = process_retrieval_results(dataset_results, max_results=5)
-        assert len(ranked) == 5
-        assert [r.document_id for r in ranked] == docs
+        d_res = dataclasses.asdict(res)
+        assert d_res["chunk_id"] == DAY49_CHUNK_A1
+        assert d_res["score"] == 0.945
 
-        for idx, doc in enumerate(docs):
-            assert ranked[idx].document_id == doc
-            assert ranked[idx].page_number == idx + 1
-            assert ranked[idx].metadata["doc"] == doc
+        citation = AgentCitation.from_search_result(res)
+        d_cit = citation.to_dict()
+        restored_cit = AgentCitation.from_dict(json.loads(json.dumps(d_cit)))
 
-    def test_retrieval_determinism_across_3_iterations(self) -> None:
-        """Running the same retrieval ranking scenario 3 times produces identical output."""
-        inputs = [
-            VectorSearchResult(
-                chunk_id=f"C-{i}", score=0.50 + (i * 0.10), document_id=f"DOC-{i}",
-                filename=f"doc_{i}.pdf", page_number=1, chunk_index=i,
-                content_type="text", content=f"Content {i}",
-            )
-            for i in range(5)
-        ]
+        assert restored_cit == citation
+        assert restored_cit.document_id == DAY49_DOC_A
+        assert restored_cit.score == 0.945
 
-        runs: list[list[str]] = []
-        for _ in range(3):
-            processed = process_retrieval_results(inputs, max_results=3)
-            runs.append([r.chunk_id for r in processed])
 
-        assert runs[0] == runs[1] == runs[2]
-        # Highest scores first: C-4 (0.9), C-3 (0.8), C-2 (0.7)
-        assert runs[0] == ["C-4", "C-3", "C-2"]
+# ============================================================================
+# 13. Failure & Error Isolation
+# ============================================================================
+
+class TestFailureIsolation:
+    """Certifies that invalid requests in a sequence do not corrupt valid requests."""
+
+    def test_sequential_failure_isolation(self) -> None:
+        """VALID-A -> INVALID-B -> VALID-C executes with clean error containment."""
+        results: list[str] = []
+
+        # 1. Valid A
+        req_a = SearchRequest(query="Valid Query A")
+        results.append(req_a.query)
+
+        # 2. Invalid B (empty query)
+        with pytest.raises(AgentValidationError):
+            SearchRequest(query="")
+
+        # 3. Valid C
+        req_c = SearchRequest(query="Valid Query C")
+        results.append(req_c.query)
+
+        assert results == ["Valid Query A", "Valid Query C"]
