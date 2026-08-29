@@ -89,6 +89,11 @@ def prepare_for_embedding(
         metadata_payload["chunk_index"] = chunk.chunk_index
         metadata_payload["page_number"] = chunk.page_number
         metadata_payload["content_type"] = chunk.content_type
+        # Store the embeddable text so it survives through EmbeddingVectorRecord
+        # into the Qdrant point payload and is recovered by search_records() via
+        # payload["metadata"]["content"].  Without this field search_records()
+        # returns content="" and SearchAgent rejects every result as uncitable.
+        metadata_payload["content"] = chunk.content
 
         items.append(
             EmbeddingRecord(
